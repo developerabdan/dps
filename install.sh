@@ -3,16 +3,18 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/developerabdan/dps/main/install.sh | sh
 #
-# The script downloads the release built for this platform, checks it against
-# the published checksums, and installs one file. It reads uname, GitHub and
-# the install directory, and nothing else. It never asks for a password, and it
-# never touches Docker.
+# The script checks that this machine can run dps, downloads the release built
+# for the platform, checks it against the published checksums, installs one
+# file, and runs it once. It reads uname, GitHub, Docker and the install
+# directory, and nothing else. It never asks for a password.
 #
 # Environment:
 #   DPS_VERSION      Tag to install, e.g. v0.2.0. Default: the latest release.
 #   DPS_INSTALL_DIR  Directory to install into. Default: /usr/local/bin when it
 #                    can be written without a password, else ~/.local/bin.
 #   DPS_NO_SUDO      Set to 1 to never use sudo.
+#   DPS_SKIP_CHECKS  Set to 1 to install without the requirement checks.
+#   DPS_NO_RUN       Set to 1 to install without running dps afterwards.
 
 set -eu
 
@@ -24,6 +26,10 @@ BIN="dps"
 main() {
 	os=$(detect_os)
 	arch=$(detect_arch)
+	dir=$(install_dir)
+
+	requirements "$os" "$arch" "$dir"
+
 	version=${DPS_VERSION:-$(latest_version)}
 	[ -n "$version" ] || err "cannot read the latest release tag from GitHub"
 
@@ -43,16 +49,149 @@ main() {
 	tar -xzf "$tmp/$asset" -C "$tmp" || err "cannot unpack $asset"
 	[ -f "$tmp/$BIN" ] || err "$asset does not contain a $BIN binary"
 
-	dir=$(install_dir)
 	place "$tmp/$BIN" "$dir"
 	report "$dir" "$version"
+	autorun "$dir"
 }
 
+# requirements prints one line per thing dps needs and stops before downloading
+# anything when a line fails. Every check is reported, not only the failing one:
+# a person fixing two missing tools should learn both in one run.
+requirements() {
+	os=$1
+	arch=$2
+	dir=$3
+	[ "${DPS_SKIP_CHECKS:-0}" = 1 ] && return 0
+
+	fail=0
+	say ""
+	info "checking requirements"
+	say ""
+
+	check "$([ -n "$os" ] && echo 0 || echo 1)" os "${os:-$(uname -s) is not supported — dps builds for linux and darwin}"
+	check "$([ -n "$arch" ] && echo 0 || echo 1)" arch "${arch:-$(uname -m) is not supported — dps builds for amd64 and arm64}"
+
+	detail=$(downloader) && check 0 download "$detail" ||
+		check 1 download "neither curl nor wget is installed"
+	detail=$(checksummer) && check 0 checksum "$detail" ||
+		check 1 checksum "no sha256sum and no shasum — install one, or set DPS_SKIP_CHECKSUM=1"
+	if command -v tar >/dev/null 2>&1; then
+		check 0 tar "$(command -v tar)"
+	else
+		check 1 tar "tar is not installed"
+	fi
+
+	detail=$(docker_engine) && check 0 docker "$detail" ||
+		check 1 docker "$detail"
+
+	if [ -w "$dir" ] || can_sudo; then
+		check 0 install "$dir is writable"
+	else
+		check 1 install "cannot write $dir — set DPS_INSTALL_DIR to a directory you own"
+	fi
+
+	say ""
+	[ "$fail" = 0 ] || err "requirements not met — fix the lines marked [x] and run this again"
+}
+
+# check prints one checklist line. A failing line sets fail, which requirements
+# reads after every check has had its say.
+check() {
+	if [ "$1" = 0 ]; then
+		printf '  [v] %-9s %s\n' "$2" "$3" >&2
+	else
+		printf '  [x] %-9s %s\n' "$2" "$3" >&2
+		fail=1
+	fi
+}
+
+# docker_engine decides whether a daemon will answer dps. The CLI is asked
+# first because it already resolves contexts; without it the socket is pinged
+# directly. A socket that cannot be pinged — no curl on the machine — is
+# accepted and said so, because unprobed is not the same as down.
+docker_engine() {
+	if command -v docker >/dev/null 2>&1; then
+		server=$(docker version --format '{{.Server.Version}}' 2>/dev/null) || server=""
+		if [ -n "$server" ]; then
+			echo "engine $server"
+			return 0
+		fi
+	fi
+
+	case ${DOCKER_HOST:-} in
+	unix://*) sock=${DOCKER_HOST#unix://} ;;
+	?*)
+		echo "DOCKER_HOST is $DOCKER_HOST — dps speaks to unix sockets only"
+		return 1
+		;;
+	*) sock=$(docker_socket) ;;
+	esac
+
+	if [ -z "$sock" ] || [ ! -S "$sock" ]; then
+		if command -v docker >/dev/null 2>&1; then
+			echo "docker is installed but no daemon is running"
+		else
+			echo "Docker Engine is not installed"
+		fi
+		return 1
+	fi
+
+	if command -v curl >/dev/null 2>&1; then
+		if curl -s -o /dev/null --max-time 3 --unix-socket "$sock" http://localhost/_ping; then
+			echo "daemon at $sock"
+			return 0
+		fi
+		echo "socket $sock exists but the daemon does not answer"
+		return 1
+	fi
+
+	echo "socket $sock (not probed — no curl to ping it with)"
+	return 0
+}
+
+# docker_socket guesses where the daemon listens. dps itself reads the active
+# Docker context to be exact; this only has to be right often enough to keep a
+# working machine from being told it has no Docker, and the CLI check above
+# covers the cases it misses.
+docker_socket() {
+	for s in "${HOME:-}/.docker/run/docker.sock" /var/run/docker.sock; do
+		[ -S "$s" ] && {
+			printf '%s\n' "$s"
+			return 0
+		}
+	done
+	printf '\n'
+}
+
+downloader() {
+	if command -v curl >/dev/null 2>&1; then
+		echo "curl"
+	elif command -v wget >/dev/null 2>&1; then
+		echo "wget"
+	else
+		return 1
+	fi
+}
+
+checksummer() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		echo "sha256sum"
+	elif command -v shasum >/dev/null 2>&1; then
+		echo "shasum"
+	elif [ "${DPS_SKIP_CHECKSUM:-0}" = 1 ]; then
+		echo "skipped, as DPS_SKIP_CHECKSUM asks"
+	else
+		return 1
+	fi
+}
+
+# detect_os and detect_arch print nothing on an unsupported platform. The empty
+# answer becomes a [x] line in the checklist rather than an error thrown before
+# the reader has seen the rest of the list.
 detect_os() {
 	case $(uname -s) in
 	Linux) echo linux ;;
 	Darwin) echo darwin ;;
-	*) err "$(uname -s) is not supported — dps builds for linux and darwin" ;;
 	esac
 }
 
@@ -60,7 +199,6 @@ detect_arch() {
 	case $(uname -m) in
 	x86_64 | amd64) echo amd64 ;;
 	aarch64 | arm64) echo arm64 ;;
-	*) err "$(uname -m) is not supported — dps builds for amd64 and arm64" ;;
 	esac
 }
 
@@ -153,6 +291,20 @@ report() {
 		;;
 	esac
 	say ""
+}
+
+# autorun starts dps once, so the first run happens here rather than being
+# homework. On a machine with no config yet that first run is the setup wizard.
+#
+# The installer is usually read from a pipe, which leaves the script's stdin
+# unusable for a program that reads keys, so the terminal is handed over
+# directly. No terminal means nothing to show, and the run is skipped.
+autorun() {
+	dir=$1
+	[ "${DPS_NO_RUN:-0}" = 1 ] && return 0
+	[ -t 1 ] || return 0
+	[ -r /dev/tty ] || return 0
+	"$dir/$BIN" </dev/tty || true
 }
 
 shell_rc() {

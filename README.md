@@ -53,8 +53,31 @@ curl -fsSL https://raw.githubusercontent.com/developerabdan/dps/main/install.sh 
 ```
 
 That line is the whole install, on a laptop or on a server that has no Go. The
-script reads `uname`, downloads the release built for that platform, checks it
-against the published `checksums.txt`, and installs one file.
+script first says whether this machine can run `dps` at all, and stops before
+downloading anything when it cannot:
+
+```
+dps: checking requirements
+
+  [v] os        darwin
+  [v] arch      arm64
+  [v] download  curl
+  [v] checksum  sha256sum
+  [v] tar       /usr/bin/tar
+  [x] docker    docker is installed but no daemon is running
+  [v] install   /usr/local/bin is writable
+
+dps: requirements not met — fix the lines marked [x] and run this again
+```
+
+Every line is checked and printed, not only the first one that fails — two
+missing tools are learned in one run. A Docker daemon that does not answer is a
+failing line: `dps` reads containers from it, so a machine without one has
+nothing to install for. `DPS_SKIP_CHECKS=1` installs anyway.
+
+Once the checks pass it downloads the release built for that platform, checks it
+against the published `checksums.txt`, installs one file, and runs `dps` once.
+On a machine that has never configured `dps`, that first run is the setup below.
 
 It never asks for a password. It installs in `/usr/local/bin` when it can write
 there — as root, or through a `sudo` that needs no password — and in
@@ -72,6 +95,8 @@ curl -fsSL https://raw.githubusercontent.com/developerabdan/dps/main/install.sh 
 | `DPS_VERSION` | Install this tag instead of the latest, e.g. `v0.2.0`. |
 | `DPS_INSTALL_DIR` | Install into this directory instead of the default one. |
 | `DPS_NO_SUDO` | `1` never uses sudo. The binary goes to `~/.local/bin`. |
+| `DPS_SKIP_CHECKS` | `1` installs without the requirement checklist. |
+| `DPS_NO_RUN` | `1` installs without running `dps` afterwards. |
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/developerabdan/dps/main/install.sh |
@@ -112,6 +137,27 @@ Run the same `curl` line again to upgrade; it overwrites the binary in place.
 To remove it, delete the one file: `sudo rm /usr/local/bin/dps`, and
 `rm -rf ~/.config/dps` if you saved a column set.
 
+## First run
+
+The first `dps` on a machine with no config file opens a short setup, then
+exits to the shell. Two questions:
+
+1. **Which columns to show.** The full catalog, with `name`, `state`, `image`
+   and `ports` already ticked. `space` toggles, `enter` accepts.
+2. **Grouped or flat.** An example table redraws under the choice as you move
+   between the two, so the difference is read rather than described.
+
+It ends by naming what it saved and where. Nothing it asks is a gate — every
+answer is also a flag — and the file is written only when the last question is
+answered. Quitting early writes nothing and leaves the setup to open again.
+
+The setup needs a terminal on stdin and stdout. `dps` in a pipe, a script or a
+cron job never stops to ask: it uses the defaults and prints the table.
+
+```sh
+dps --onboard    # run the setup again, starting from your current settings
+```
+
 ## Usage
 
 ```
@@ -132,6 +178,7 @@ dps [flags]
 | `-plain` | Force the plain table even on a terminal. |
 | `-json` | One JSON record per line. |
 | `-config` | Print the config path and contents, then exit. |
+| `-onboard` | Run the first-run setup again, then exit. |
 | `-list-cols` | Print the column catalog, then exit. |
 | `-version` | Print the version, then exit. |
 

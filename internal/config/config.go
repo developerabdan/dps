@@ -14,9 +14,13 @@ import (
 // Config is the on-disk shape. A missing file is not an error, so every field
 // has a usable zero value.
 type Config struct {
-	Cols           []string            `json:"cols"`
-	Sort           string              `json:"sort,omitempty"`
-	GroupByProject bool                `json:"group_by_project,omitempty"`
+	Cols []string `json:"cols"`
+	Sort string   `json:"sort,omitempty"`
+	// No omitempty. Grouping defaults to on, so false is a real answer and
+	// dropping it from the file would read back as the default — anyone who
+	// chose the flat view, in the wizard or by hand, would silently get groups
+	// again on the next run.
+	GroupByProject bool                `json:"group_by_project"`
 	Presets        map[string][]string `json:"presets,omitempty"`
 }
 
@@ -53,6 +57,19 @@ func Path() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".config", "dps", "config.json"), nil
+}
+
+// Exists reports whether a config file has been written. A missing file is
+// what makes a run the first one, so this is the whole test the wizard hangs
+// off — dps never writes a file it was not asked to write, which keeps that
+// test honest.
+func Exists() bool {
+	path, err := Path()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
 }
 
 // Load reads the config. A missing file yields the defaults and no error:

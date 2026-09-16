@@ -60,6 +60,7 @@ func run() error {
 		preset   = flag.String("preset", "", "use a saved preset as the column set")
 		savePres = flag.String("save-preset", "", "save the resulting columns under this name and exit")
 		showConf = flag.Bool("config", false, "print the config path and contents, then exit")
+		onboard  = flag.Bool("onboard", false, "run the first-run setup again, then exit")
 		listCols = flag.Bool("list-cols", false, "print the column catalog and exit")
 		watch    = flag.Int("w", 0, "redraw every N seconds")
 		showVer  = flag.Bool("version", false, "print version and exit")
@@ -89,6 +90,37 @@ func run() error {
 	}
 	if *showConf {
 		return printConfig(cfg)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	isTTY := term.IsTTY(os.Stdout)
+
+	// The wizard writes the config file, so it runs only when nothing else on
+	// this command line is already doing that job, and only on a machine that
+	// has never saved one. --onboard asks for it again by hand.
+	unconfigured := !config.Exists() &&
+		*setCols == "" && *savePres == "" && *colsFlag == "" && *preset == "" &&
+		!*asJSON && !*plain && *watch <= 0
+	if *onboard || unconfigured {
+		// It reads keys and draws frames, so it needs a terminal at both ends.
+		// Without one a first run carries straight on with the defaults —
+		// `dps` inside a script or a pipe must never stop to ask a question —
+		// while --onboard, which was typed on purpose, says why it cannot.
+		switch {
+		case isTTY && term.IsTTY(os.Stdin):
+			done, err := ui.Onboard(ctx, cfg)
+			if err != nil {
+				return err
+			}
+			if !done {
+				fmt.Fprintln(os.Stderr, "dps: setup cancelled — run `dps --onboard` to do it later")
+			}
+			return nil
+		case *onboard:
+			return fmt.Errorf("--onboard needs a terminal on stdin and stdout")
+		}
 	}
 
 	// The config sets the default. A -g or --group actually typed on the
@@ -148,9 +180,6 @@ func run() error {
 		return nil
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	client, err := dockerapi.New(ctx)
 	if err != nil {
 		return err
@@ -162,8 +191,6 @@ func run() error {
 			opt.Size = true
 		}
 	}
-
-	isTTY := term.IsTTY(os.Stdout)
 
 	// A terminal gets the interactive view. --plain and --json are explicit
 	// one-shot requests, and -w already owns its own redraw loop, so each of
