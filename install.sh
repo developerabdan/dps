@@ -11,6 +11,8 @@
 #   DPS_VERSION      Tag to install, e.g. v0.2.0. Default: the latest release.
 #   DPS_INSTALL_DIR  Directory to install into. Default: /usr/local/bin, or
 #                    ~/.local/bin when /usr/local/bin cannot be written.
+#   DPS_NO_SUDO      Set to 1 to never ask for a password. The binary then goes
+#                    to ~/.local/bin.
 
 set -eu
 
@@ -43,12 +45,7 @@ main() {
 
 	dir=$(install_dir)
 	place "$tmp/$BIN" "$dir"
-
-	info "installed $("$dir/$BIN" --version 2>/dev/null || echo "$BIN $version") in $dir"
-	case ":$PATH:" in
-	*":$dir:"*) ;;
-	*) info "$dir is not on your PATH — add it, or move $dir/$BIN somewhere that is" ;;
-	esac
+	report "$dir" "$version"
 }
 
 detect_os() {
@@ -97,18 +94,36 @@ verify() {
 		err "checksum mismatch for $name: expected $expected, got $actual"
 }
 
+# install_dir prefers /usr/local/bin, because that directory is already on
+# everyone's PATH and `dps` then works the moment the script ends. Only when
+# root is out of reach does the binary go under $HOME.
 install_dir() {
 	if [ -n "${DPS_INSTALL_DIR:-}" ]; then
 		mkdir -p "$DPS_INSTALL_DIR" || err "cannot create $DPS_INSTALL_DIR"
 		echo "$DPS_INSTALL_DIR"
 		return
 	fi
-	if [ -w /usr/local/bin ] || can_sudo; then
+	if [ -w /usr/local/bin ] || sudo_ready; then
 		echo /usr/local/bin
 		return
 	fi
 	mkdir -p "$HOME/.local/bin" || err "cannot create $HOME/.local/bin"
 	echo "$HOME/.local/bin"
+}
+
+# sudo_ready reports whether root is reachable without the script hanging:
+# either sudo needs no password, or there is a terminal to type one into. A
+# refused or mistyped password is not an error — the install falls back to
+# $HOME. DPS_NO_SUDO=1 skips the question entirely.
+sudo_ready() {
+	[ "${DPS_NO_SUDO:-0}" = 1 ] && return 1
+	command -v sudo >/dev/null 2>&1 || return 1
+	sudo -n true >/dev/null 2>&1 && return 0
+	[ -r /dev/tty ] || return 1
+
+	info "installing in /usr/local/bin needs root, so that \`dps\` works straight away"
+	info "answer the password prompt, or press ctrl-c to install in ~/.local/bin instead"
+	sudo -v -p "password for %p: " </dev/tty || return 1
 }
 
 place() {
@@ -117,13 +132,56 @@ place() {
 	if [ -w "$dir" ]; then
 		install -m 0755 "$from" "$dir/$BIN" || err "cannot write $dir/$BIN"
 	else
-		info "$dir needs root — running sudo install"
 		sudo install -m 0755 "$from" "$dir/$BIN" || err "cannot write $dir/$BIN"
 	fi
 }
 
-can_sudo() {
-	command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1
+# report says what happened and, when the directory is not on PATH, what to type
+# to fix that. It never leaves the reader to work out the next step.
+report() {
+	dir=$1
+	version=$2
+	installed=$("$dir/$BIN" --version 2>/dev/null || echo "$BIN $version")
+
+	case ":$PATH:" in
+	*":$dir:"*)
+		say ""
+		say "$installed is installed in $dir"
+		say "run it:  dps"
+		say ""
+		return
+		;;
+	esac
+
+	rc=$(shell_rc)
+	say ""
+	say "$installed is installed in $dir"
+	say ""
+	say "$dir is not on your PATH, so typing \`dps\` does not work yet."
+	say "run it right now with the full path:"
+	say ""
+	say "    $dir/$BIN"
+	say ""
+	say "to type just \`dps\` from anywhere, do one of these:"
+	say ""
+	say "  1. move it where your PATH already looks:"
+	say ""
+	say "       sudo install -m 0755 $dir/$BIN /usr/local/bin/$BIN"
+	say ""
+	say "  2. or add this directory to your PATH:"
+	say ""
+	say "       echo 'export PATH=\"$dir:\$PATH\"' >> $rc"
+	say "       . $rc"
+	say ""
+}
+
+shell_rc() {
+	case ${SHELL##*/} in
+	zsh) echo "$HOME/.zshrc" ;;
+	bash) echo "$HOME/.bashrc" ;;
+	ksh) echo "$HOME/.kshrc" ;;
+	*) echo "$HOME/.profile" ;;
+	esac
 }
 
 fetch() {
@@ -146,7 +204,10 @@ download() {
 	fi
 }
 
+# Progress lines carry the program name; the closing report does not, because it
+# is read as a paragraph rather than scanned as a log.
 info() { printf '%s: %s\n' "$BIN" "$1" >&2; }
+say() { printf '%s\n' "$1" >&2; }
 err() {
 	printf '%s: %s\n' "$BIN" "$1" >&2
 	exit 1

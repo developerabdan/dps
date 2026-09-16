@@ -54,9 +54,13 @@ curl -fsSL https://raw.githubusercontent.com/developerabdan/dps/main/install.sh 
 
 That line is the whole install, on a laptop or on a server that has no Go. The
 script reads `uname`, downloads the release built for that platform, checks it
-against the published `checksums.txt`, and installs one file in
-`/usr/local/bin` — or in `~/.local/bin` when `/usr/local/bin` needs a root it
-cannot get. It asks for `sudo` only for that one `install` command.
+against the published `checksums.txt`, and installs one file.
+
+It installs in `/usr/local/bin`, so that `dps` works the moment the script ends.
+That directory belongs to root, so `sudo` asks for your password once — for the
+one `install` command and nothing else. Refuse the password, press ctrl-c, or
+set `DPS_NO_SUDO=1`, and the binary goes to `~/.local/bin` instead; the script
+then prints the line that puts that directory on your `PATH`.
 
 Read it before you run it if you prefer — it is one file of POSIX `sh`:
 
@@ -68,6 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/developerabdan/dps/main/install.sh 
 |---|---|
 | `DPS_VERSION` | Install this tag instead of the latest, e.g. `v0.2.0`. |
 | `DPS_INSTALL_DIR` | Install into this directory instead of the default one. |
+| `DPS_NO_SUDO` | `1` never asks for a password. The binary goes to `~/.local/bin`. |
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/developerabdan/dps/main/install.sh |
