@@ -5,14 +5,14 @@
 #
 # The script downloads the release built for this platform, checks it against
 # the published checksums, and installs one file. It reads uname, GitHub and
-# the install directory, and nothing else. It never touches Docker.
+# the install directory, and nothing else. It never asks for a password, and it
+# never touches Docker.
 #
 # Environment:
 #   DPS_VERSION      Tag to install, e.g. v0.2.0. Default: the latest release.
-#   DPS_INSTALL_DIR  Directory to install into. Default: /usr/local/bin, or
-#                    ~/.local/bin when /usr/local/bin cannot be written.
-#   DPS_NO_SUDO      Set to 1 to never ask for a password. The binary then goes
-#                    to ~/.local/bin.
+#   DPS_INSTALL_DIR  Directory to install into. Default: /usr/local/bin when it
+#                    can be written without a password, else ~/.local/bin.
+#   DPS_NO_SUDO      Set to 1 to never use sudo.
 
 set -eu
 
@@ -94,16 +94,13 @@ verify() {
 		err "checksum mismatch for $name: expected $expected, got $actual"
 }
 
-# install_dir prefers /usr/local/bin, because that directory is already on
-# everyone's PATH and `dps` then works the moment the script ends. Only when
-# root is out of reach does the binary go under $HOME.
 install_dir() {
 	if [ -n "${DPS_INSTALL_DIR:-}" ]; then
 		mkdir -p "$DPS_INSTALL_DIR" || err "cannot create $DPS_INSTALL_DIR"
 		echo "$DPS_INSTALL_DIR"
 		return
 	fi
-	if [ -w /usr/local/bin ] || sudo_ready; then
+	if [ -w /usr/local/bin ] || can_sudo; then
 		echo /usr/local/bin
 		return
 	fi
@@ -111,19 +108,12 @@ install_dir() {
 	echo "$HOME/.local/bin"
 }
 
-# sudo_ready reports whether root is reachable without the script hanging:
-# either sudo needs no password, or there is a terminal to type one into. A
-# refused or mistyped password is not an error — the install falls back to
-# $HOME. DPS_NO_SUDO=1 skips the question entirely.
-sudo_ready() {
+# can_sudo is true only for sudo that needs no password. A password prompt in a
+# piped script is worth avoiding, so a locked sudo simply sends the binary to
+# $HOME instead, and report() says what to do next.
+can_sudo() {
 	[ "${DPS_NO_SUDO:-0}" = 1 ] && return 1
-	command -v sudo >/dev/null 2>&1 || return 1
-	sudo -n true >/dev/null 2>&1 && return 0
-	[ -r /dev/tty ] || return 1
-
-	info "installing in /usr/local/bin needs root, so that \`dps\` works straight away"
-	info "answer the password prompt, or press ctrl-c to install in ~/.local/bin instead"
-	sudo -v -p "password for %p: " </dev/tty || return 1
+	command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1
 }
 
 place() {
@@ -132,55 +122,45 @@ place() {
 	if [ -w "$dir" ]; then
 		install -m 0755 "$from" "$dir/$BIN" || err "cannot write $dir/$BIN"
 	else
-		sudo install -m 0755 "$from" "$dir/$BIN" || err "cannot write $dir/$BIN"
+		sudo -n install -m 0755 "$from" "$dir/$BIN" || err "cannot write $dir/$BIN"
 	fi
 }
 
-# report says what happened and, when the directory is not on PATH, what to type
-# to fix that. It never leaves the reader to work out the next step.
+# report is the last thing anyone reads, so it is short: where the binary is,
+# and the one command that matters next.
 report() {
 	dir=$1
 	version=$2
 	installed=$("$dir/$BIN" --version 2>/dev/null || echo "$BIN $version")
+	# ~ for reading, $HOME for pasting: a tilde inside the double quotes of an
+	# export line is not expanded, and would set a literal "~/..." on PATH.
+	short=$(printf '%s' "$dir" | sed "s|^$HOME/|~/|")
+	literal=$(printf '%s' "$dir" | sed "s|^$HOME/|\$HOME/|")
 
+	say ""
 	case ":$PATH:" in
 	*":$dir:"*)
+		say "$installed installed in $short"
 		say ""
-		say "$installed is installed in $dir"
-		say "run it:  dps"
+		say "  dps       list containers"
+		say "  dps -h    flags"
+		;;
+	*)
+		say "$installed installed in $short — not on your PATH"
 		say ""
-		return
+		say "  run now:  $short/$BIN"
+		say "  or fix:   echo 'export PATH=\"$literal:\$PATH\"' >> $(shell_rc) && . $(shell_rc)"
 		;;
 	esac
-
-	rc=$(shell_rc)
-	say ""
-	say "$installed is installed in $dir"
-	say ""
-	say "$dir is not on your PATH, so typing \`dps\` does not work yet."
-	say "run it right now with the full path:"
-	say ""
-	say "    $dir/$BIN"
-	say ""
-	say "to type just \`dps\` from anywhere, do one of these:"
-	say ""
-	say "  1. move it where your PATH already looks:"
-	say ""
-	say "       sudo install -m 0755 $dir/$BIN /usr/local/bin/$BIN"
-	say ""
-	say "  2. or add this directory to your PATH:"
-	say ""
-	say "       echo 'export PATH=\"$dir:\$PATH\"' >> $rc"
-	say "       . $rc"
 	say ""
 }
 
 shell_rc() {
 	case ${SHELL##*/} in
-	zsh) echo "$HOME/.zshrc" ;;
-	bash) echo "$HOME/.bashrc" ;;
-	ksh) echo "$HOME/.kshrc" ;;
-	*) echo "$HOME/.profile" ;;
+	zsh) echo "~/.zshrc" ;;
+	bash) echo "~/.bashrc" ;;
+	ksh) echo "~/.kshrc" ;;
+	*) echo "~/.profile" ;;
 	esac
 }
 
@@ -204,8 +184,6 @@ download() {
 	fi
 }
 
-# Progress lines carry the program name; the closing report does not, because it
-# is read as a paragraph rather than scanned as a log.
 info() { printf '%s: %s\n' "$BIN" "$1" >&2; }
 say() { printf '%s\n' "$1" >&2; }
 err() {
