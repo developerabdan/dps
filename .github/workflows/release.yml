@@ -1,0 +1,62 @@
+name: release
+
+# A tag push builds every target, publishes the tarballs and their checksums,
+# and that is what install.sh downloads. Nothing is published by hand.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+
+      - name: Test
+        run: |
+          gofmt -l . | tee /tmp/unformatted
+          test ! -s /tmp/unformatted
+          go vet ./...
+          go test ./...
+
+      - name: Build every target
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -eu
+          v="${VERSION#v}"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            stage="dist/dps_${v}_${os}_${arch}"
+            mkdir -p "$stage"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "$stage/dps" ./cmd/dps
+            cp LICENSE README.md "$stage/"
+            tar -czf "${stage}.tar.gz" -C "$stage" .
+            rm -rf "$stage"
+          done
+          cd dist && sha256sum ./*.tar.gz | sed 's| \./| |' > checksums.txt
+          cat checksums.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            dist/*.tar.gz dist/checksums.txt \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

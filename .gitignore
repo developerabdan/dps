@@ -1,0 +1,14 @@
+# Build output. The binary is 11 MB and is rebuilt by `go build`.
+/bin/
+/dist/
+
+# Config writes go to a temporary file first and are renamed; a crash can
+# leave one behind.
+*.tmp
+
+# Local tooling state, not part of the project.
+.memsearch/
+
+.DS_Store
+CLAUDE.md
+/docs
