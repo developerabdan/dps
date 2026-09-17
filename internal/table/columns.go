@@ -2,7 +2,6 @@ package table
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/developerabdan/dps/internal/model"
@@ -24,6 +23,17 @@ type Column struct {
 	Value  func(c model.Container) string
 }
 
+// CPUWidth is the printed width of the cpu column: the graph, one space, and
+// a percentage right-aligned in six cells.
+const CPUWidth = CPUBars + 1 + 6
+
+// CPUBars is how many samples the cpu column draws. At one sample every two
+// seconds that is the last twenty seconds.
+const CPUBars = 10
+
+// LiveOnly lists the columns that only the interactive view can fill.
+var LiveOnly = []string{"cpu"}
+
 // DefaultKeys is the column set used when nothing is configured.
 var DefaultKeys = []string{"name", "state", "image", "ports"}
 
@@ -37,6 +47,13 @@ var Catalog = []Column{
 		Value: func(c model.Container) string { return model.ShortImage(c.Image) }},
 	{Key: "ports", Header: "PORTS", Prio: 4, Min: 8, Max: 26, Trunc: TruncTail,
 		Value: func(c model.Container) string { return model.CompactPorts(c.Ports) }},
+	// cpu is a graph of the last samples and the latest percentage. A graph
+	// needs history, and only the interactive view keeps any, so here the
+	// value is empty and the view supplies its own. Min and Max are the same
+	// because a graph that is cut short no longer reads as a graph: the column
+	// is dropped whole instead.
+	{Key: "cpu", Header: "CPU", Prio: 4, Min: CPUWidth, Max: CPUWidth, Trunc: TruncTail,
+		Value: func(model.Container) string { return "" }},
 	{Key: "health", Header: "HEALTH", Prio: 5, Min: 8, Max: 12, Trunc: TruncTail,
 		Value: func(c model.Container) string { return c.Health }},
 	{Key: "created", Header: "CREATED", Prio: 6, Min: 6, Max: 10, Trunc: TruncTail,
@@ -48,7 +65,7 @@ var Catalog = []Column{
 	{Key: "ip", Header: "IP", Prio: 8, Min: 9, Max: 15, Trunc: TruncTail,
 		Value: func(c model.Container) string { return c.IP }},
 	{Key: "size", Header: "SIZE", Prio: 9, Min: 6, Max: 10, Trunc: TruncTail,
-		Value: func(c model.Container) string { return humanBytes(c.Size) }},
+		Value: func(c model.Container) string { return model.HumanBytes(c.Size) }},
 	{Key: "id", Header: "ID", Prio: 9, Min: 4, Max: 12, Trunc: TruncTail,
 		Value: func(c model.Container) string {
 			if len(c.ID) > 6 {
@@ -99,20 +116,4 @@ func Resolve(keys []string) ([]Column, error) {
 		return nil, fmt.Errorf("no columns selected; available: %s", strings.Join(Keys(), ", "))
 	}
 	return out, nil
-}
-
-func humanBytes(n int64) string {
-	if n <= 0 {
-		return ""
-	}
-	const unit = 1000
-	if n < unit {
-		return strconv.FormatInt(n, 10) + "B"
-	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit && exp < 3; m /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "kMGT"[exp])
 }

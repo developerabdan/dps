@@ -11,11 +11,16 @@ A readable `docker ps`.
 - **Groups by compose project.** Or shows a flat list with `-g=false`.
 - **Interactive view.** Cursor, scroll, and live refresh every two seconds.
   Changed rows show bold for a moment.
-- **Shell in one key.** Press `e` to open `bash` (or `sh`) in the selected
-  container.
+- **Live CPU graph.** Add the `cpu` column to see a small graph of each
+  container's CPU next to the number.
+- **Stats view.** Press `s` for CPU, memory, disk and network charts of the
+  selected container.
+- **Shell in one key.** Press `e`, then `y`, to open `bash` (or `sh`) in the
+  selected container.
 - **Pipe friendly.** In a pipe, the output is a plain table with no colour, so
   `grep` and `awk` work. `--json` gives one record per line.
-- **Your columns.** Choose columns, save a default, and save presets.
+- **Your columns.** Press `c` to tick columns and see the result at once, or
+  use flags. Save a default and presets.
 - **Short first-run setup.** Two questions, then done. Every answer is also a
   flag.
 - **Read-only.** `dps` never starts, stops or removes a container.

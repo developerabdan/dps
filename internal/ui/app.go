@@ -13,6 +13,7 @@ import (
 
 	"github.com/developerabdan/dps/internal/dockerapi"
 	"github.com/developerabdan/dps/internal/model"
+	"github.com/developerabdan/dps/internal/stats"
 	"github.com/developerabdan/dps/internal/table"
 	"github.com/developerabdan/dps/internal/term"
 )
@@ -25,6 +26,7 @@ const (
 	ansiGreen   = "\x1b[32m"
 	ansiRed     = "\x1b[31m"
 	ansiYellow  = "\x1b[33m"
+	ansiCyan    = "\x1b[36m"
 )
 
 // refreshInterval is the fallback poll. The event feed is the better source
@@ -48,6 +50,25 @@ const noticeFor = 2 * time.Second
 // next poll can mark it.
 const flashFor = 1500 * time.Millisecond
 
+// statsTimeout bounds one round of stats requests. A daemon that stops
+// answering must not leave the graphs waiting for ever: the round ends, and
+// the next poll starts a new one.
+const statsTimeout = 5 * time.Second
+
+// cpuFloor is the least the top of a CPU graph stands for, in percent. Below
+// it an idle container draws a flat line instead of blowing its own noise up
+// to full height.
+const cpuFloor = 10
+
+// mode is which screen the interactive view is showing.
+type mode int
+
+const (
+	modeList mode = iota
+	modeStats
+	modePick
+)
+
 type (
 	// rowsMsg carries one fetch. manual marks the fetch that r asked for,
 	// because only that one reports its result on the status line — the
@@ -57,6 +78,7 @@ type (
 		manual bool
 	}
 	errMsg        struct{ err error }
+	statsMsg      struct{ samples map[string]model.Sample }
 	tickMsg       struct{}
 	noticeDoneMsg struct{ gen int }
 	flashDoneMsg  struct{ gen int }
@@ -108,7 +130,30 @@ type Model struct {
 	seen     map[string]string
 	flash    map[string]bool
 	flashGen int
+
+	mode mode
+
+	// series is the resource history of each container, by rowKey. Samples are
+	// taken only for what is on screen: every running container while the cpu
+	// column is shown, and the one container the stats view is open on.
+	// sampling is set while a round of requests is out, so a slow daemon does
+	// not collect a queue of them.
+	series   map[string]*stats.Series
+	sampling bool
+
+	// statsKey and statsName are the container the stats view shows. They are
+	// kept apart from the cursor because a refresh can move rows under it.
+	statsKey  string
+	statsName string
+
+	// confirm is the container that waits for a yes before a shell opens in
+	// it. One stray e must not take the screen away.
+	confirm *shellAsk
+
+	pick picker
 }
+
+type shellAsk struct{ key, name string }
 
 // Run opens the interactive view and blocks until the user quits.
 func Run(ctx context.Context, client *dockerapi.Client, cols []table.Column, opt dockerapi.ListOptions, group bool) error {
@@ -163,6 +208,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshing = false
 			cmds = append(cmds, m.say(ansiGreen, "↻ refreshed · "+d.summary()))
 		}
+		if m.mode == modeStats {
+			if i := m.indexOf(m.statsKey); i >= 0 {
+				m.cursor = i
+				m.ensureVisible()
+			} else {
+				m.mode = modeList
+				m.ensureVisible()
+				cmds = append(cmds, m.say(ansiYellow, m.statsName+" is gone"))
+			}
+		}
+		// A container that has no history yet — the first fetch, or one that
+		// just started — gets its first sample now instead of at the next
+		// poll, so its graph begins two seconds sooner.
+		cmds = append(cmds, m.sampleMissing())
 		return m, tea.Batch(cmds...)
 
 	case errMsg:
@@ -174,7 +233,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		return m, tea.Batch(m.fetch(false), tick())
+		sample := m.sample()
+		return m, tea.Batch(m.fetch(false), tick(), sample)
+
+	case statsMsg:
+		m.sampling = false
+		if m.series == nil {
+			m.series = map[string]*stats.Series{}
+		}
+		for key, smp := range msg.samples {
+			s := m.series[key]
+			if s == nil {
+				s = &stats.Series{}
+				m.series[key] = s
+			}
+			s.Add(smp)
+		}
+		m.pruneSeries()
+		return m, nil
 
 	case noticeDoneMsg:
 		if msg.gen == m.noticeGen {
@@ -201,6 +277,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case tea.MouseWheelMsg:
+		if m.mode == modeStats {
+			return m, nil
+		}
 		switch msg.Button {
 		case tea.MouseWheelUp:
 			m.scroll(-scrollJump)
@@ -210,6 +289,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		switch {
+		case m.confirm != nil:
+			return m.answerShell(msg)
+		case m.mode == modeStats:
+			return m.updateStats(msg)
+		case m.mode == modePick:
+			return m.updatePick(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
@@ -249,7 +336,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice, m.noticeColor = "↻ refreshing…", ansiDim
 			return m, m.fetch(true)
 		case "e":
-			return m.openShell()
+			return m.askShell()
+		case "s":
+			return m.openStats()
+		case "c":
+			return m.openPicker()
 		}
 	}
 	return m, nil
@@ -272,14 +363,23 @@ func (m Model) View() tea.View {
 	if m.err != nil {
 		return altView(fmt.Sprintf("dps: %v\n\n%spress q to quit%s\n", m.err, ansiDim, ansiReset))
 	}
+	if m.mode == modeStats {
+		return altView(m.viewStats())
+	}
+
+	var b strings.Builder
+	if m.mode == modePick {
+		b.WriteString(m.viewPicker())
+	}
 	if len(m.rows) == 0 {
-		return altView(fmt.Sprintf("%sno containers%s\n\n%s", ansiDim, ansiReset, m.help()))
+		b.WriteString(fmt.Sprintf("%sno containers%s\n\n%s", ansiDim, ansiReset, m.help()))
+		return altView(b.String())
 	}
 
 	// Indent inside the first column rather than shifting the whole line, so
 	// the other columns stay on their axis. This is the same rule the plain
 	// table uses.
-	cols := m.cols
+	cols := m.liveCols(m.cols)
 	if m.group {
 		cols = table.IndentFirst(cols, table.GroupIndent)
 	}
@@ -296,7 +396,6 @@ func (m Model) View() tea.View {
 		end = len(slots)
 	}
 
-	var b strings.Builder
 	b.WriteString(ansiDim)
 	b.WriteString(m.line(active, widths, headerCells(active)))
 	b.WriteString(ansiReset)
@@ -316,7 +415,7 @@ func (m Model) View() tea.View {
 			}
 			switch {
 			case s.row == m.cursor:
-				b.WriteString(ansiReverse + m.line(active, widths, cells) + ansiReset)
+				b.WriteString(m.selectedLine(active, widths, cells))
 			case m.flash[rowKey(r)]:
 				b.WriteString(bold(colorize(active, r, cells, widths, m.line)))
 			default:
@@ -386,9 +485,14 @@ func (m Model) slots() []slot {
 	return out
 }
 
-// bodyHeight is how many lines the scrolling region gets.
+// bodyHeight is how many lines the scrolling region gets. The column picker
+// takes its lines from the top, and the table below it shrinks to fit.
 func (m Model) bodyHeight() int {
-	if h := m.height - chromeLines; h > 0 {
+	chrome := chromeLines
+	if m.mode == modePick {
+		chrome += m.pickerLines()
+	}
+	if h := m.height - chrome; h > 0 {
 		return h
 	}
 	return 1
@@ -535,10 +639,14 @@ func (m Model) status(dropped []table.Column, clipped bool) string {
 
 	// The notice goes first, so a narrow window cuts the counts rather than the
 	// one thing that just changed.
+	notice, color := m.notice, m.noticeColor
+	if m.confirm != nil {
+		notice, color = "open a shell in "+m.confirm.name+"? y/n", ansiBold+ansiYellow
+	}
 	lead, room := "", m.width
-	if m.notice != "" {
-		n := table.Truncate(m.notice, m.width, table.TruncTail)
-		lead = m.noticeColor + n + ansiReset
+	if notice != "" {
+		n := table.Truncate(notice, m.width, table.TruncTail)
+		lead = color + n + ansiReset
 		room -= table.Width(n)
 		const sep = " · "
 		if room <= table.Width(sep) {
@@ -561,7 +669,15 @@ func (m Model) status(dropped []table.Column, clipped bool) string {
 }
 
 func (m Model) help() string {
-	keys := "↑↓ move · PgUp/PgDn page · e shell · a toggle stopped · r refresh · q quit"
+	keys := "↑↓ move · s stats · e shell · c columns · a toggle stopped · r refresh · q quit"
+	switch {
+	case m.confirm != nil:
+		keys = "y or enter opens the shell · any other key cancels"
+	case m.mode == modePick:
+		keys = "↑↓ move · space toggle · enter save as default · esc cancel"
+	case m.mode == modeStats:
+		keys = "↑↓ other container · esc back · ctrl+c quit"
+	}
 	return ansiDim + table.Truncate(keys, m.width, table.TruncTail) + ansiReset
 }
 
@@ -584,10 +700,10 @@ func (m Model) fetch(manual bool) tea.Cmd {
 	}
 }
 
-// openShell hands the terminal to a shell in the selected container. A
-// container that is not running has no process to exec into, and the daemon
-// would only answer 409, so that is said on the status line instead.
-func (m Model) openShell() (tea.Model, tea.Cmd) {
+// askShell puts the question on the status line. A container that is not
+// running has no process to exec into, and the daemon would only answer 409,
+// so that is said at once instead of asking first.
+func (m Model) askShell() (tea.Model, tea.Cmd) {
 	if len(m.rows) == 0 {
 		return m, nil
 	}
@@ -595,6 +711,36 @@ func (m Model) openShell() (tea.Model, tea.Cmd) {
 	if r.State != "running" {
 		return m, m.say(ansiYellow, r.Name+" is not running")
 	}
+	m.confirm = &shellAsk{key: rowKey(r), name: r.Name}
+	return m, nil
+}
+
+// answerShell takes the key pressed after the question. Only y or enter opens
+// the shell. Any other key cancels and does nothing else, so a key typed
+// without reading the question cannot also move the cursor or quit.
+func (m Model) answerShell(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	ask := m.confirm
+	m.confirm = nil
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "y", "Y", "enter":
+		// The list can change while the question waits, so the container is
+		// found again by key rather than taken from under the cursor.
+		i := m.indexOf(ask.key)
+		if i < 0 {
+			return m, m.say(ansiYellow, ask.name+" is gone")
+		}
+		if m.rows[i].State != "running" {
+			return m, m.say(ansiYellow, ask.name+" is not running")
+		}
+		return m.openShell(m.rows[i])
+	}
+	return m, m.say(ansiDim, "shell cancelled")
+}
+
+// openShell hands the terminal to a shell in the container.
+func (m Model) openShell(r model.Container) (tea.Model, tea.Cmd) {
 	if m.client == nil {
 		return m, nil
 	}
@@ -717,6 +863,12 @@ func colorize(cols []table.Column, r model.Container, cells []string, widths []i
 	line func([]table.Column, []int, []string) string) string {
 	out := line(cols, widths, cells)
 	for i, c := range cols {
+		if c.Key == "cpu" {
+			if g := graphPart(cells[i]); g != "" {
+				out = strings.Replace(out, g, ansiCyan+g+ansiReset, 1)
+			}
+			continue
+		}
 		if c.Key != "state" {
 			continue
 		}
@@ -732,7 +884,6 @@ func colorize(cols []table.Column, r model.Container, cells []string, widths []i
 			painted = table.Pad(painted, widths[i])
 		}
 		out = strings.Replace(out, painted, code+painted+ansiReset, 1)
-		break
 	}
 	return out
 }

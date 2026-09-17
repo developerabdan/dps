@@ -43,6 +43,7 @@ var colDesc = map[string]string{
 	"state":   "running state and uptime",
 	"image":   "image, registry stripped",
 	"ports":   "published ports",
+	"cpu":     "CPU graph, live view only",
 	"health":  "healthcheck result",
 	"created": "age",
 	"project": "compose project",
@@ -73,6 +74,10 @@ type wizard struct {
 	saved bool
 	err   error
 	path  string
+
+	// colsOnly is the wizard started by --pick-cols: the column question
+	// alone, saved on enter, with the rest of the config left as it is.
+	colsOnly bool
 }
 
 // newWizard starts the wizard from the configuration already in force, so
@@ -107,6 +112,22 @@ func Onboard(ctx context.Context, cfg config.Config) (bool, error) {
 		return false, nil
 	}
 	return final.saved, final.err
+}
+
+// PickColumns asks only which columns to show and saves the answer as the
+// default. It returns the saved columns, or nothing when the user backed out.
+func PickColumns(ctx context.Context, cfg config.Config) ([]string, error) {
+	w := newWizard(cfg)
+	w.colsOnly = true
+	out, err := tea.NewProgram(w, tea.WithContext(ctx)).Run()
+	if err != nil {
+		return nil, err
+	}
+	final, ok := out.(wizard)
+	if !ok || !final.saved {
+		return nil, final.err
+	}
+	return final.cfg.Cols, nil
 }
 
 func (w wizard) Init() tea.Cmd { return nil }
@@ -159,9 +180,20 @@ func (w wizard) updateCols(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		// A table with no columns has nothing to print, so the step simply does
 		// not advance. The hint under the list already says what is missing.
-		if len(w.selected()) > 0 {
-			w.step = stepView
+		if len(w.selected()) == 0 {
+			break
 		}
+		if !w.colsOnly {
+			w.step = stepView
+			break
+		}
+		w.cfg.Cols = w.result()
+		if err := w.cfg.Save(); err != nil {
+			w.err = err
+			return w, tea.Quit
+		}
+		w.saved = true
+		return w, tea.Quit
 	}
 	return w, nil
 }
@@ -206,6 +238,16 @@ func (w wizard) selected() []string {
 	return out
 }
 
+// result is the column list the wizard would save. The first run has no order
+// to keep, so it uses the catalog's. --pick-cols changes an existing set, and
+// an order set by hand is kept.
+func (w wizard) result() []string {
+	if w.colsOnly {
+		return ordered(w.cfg.Cols, w.picked)
+	}
+	return w.selected()
+}
+
 // View draws the wizard inline rather than on the alternate screen. The last
 // frame is the congratulations, and the alternate screen would wipe it the
 // moment the program exits.
@@ -225,27 +267,14 @@ func (w wizard) viewCols() string {
 	b.WriteString(w.title("Which columns should dps show?"))
 
 	for i, key := range w.keys {
-		mark := " "
-		if w.picked[key] {
-			mark = "x"
-		}
-		point := "  "
-		if i == w.cursor {
-			point = "› "
-		}
-		line := fmt.Sprintf("%s[%s] %-8s %s", point, mark, key, colDesc[key])
-		line = table.Truncate(line, w.width, table.TruncTail)
-		if i == w.cursor {
-			line = ansiBold + line + ansiReset
-		}
-		b.WriteString("  " + line + "\n")
+		b.WriteString(pickLine(key, w.picked[key], i == w.cursor, w.width) + "\n")
 	}
 
 	// The preview is the first thing to go in a short window: the list is what
 	// the keys operate, and a wizard that scrolls is worse than one that shows
 	// less.
 	if w.height >= shortHeight {
-		if cols, err := table.Resolve(w.selected()); err == nil {
+		if cols, err := table.Resolve(w.result()); err == nil {
 			b.WriteString("\n")
 			b.WriteString("  " + ansiDim + "example" + ansiReset + "\n")
 			b.WriteString(preview(cols, false, w.previewWidth(), 2))
@@ -256,7 +285,11 @@ func (w wizard) viewCols() string {
 	if len(w.selected()) == 0 {
 		b.WriteString("  " + ansiYellow + "pick at least one column" + ansiReset + "\n")
 	}
-	b.WriteString(w.help("↑↓ move · space toggle · enter next · esc quit"))
+	if w.colsOnly {
+		b.WriteString(w.help("↑↓ move · space toggle · enter save · esc quit"))
+	} else {
+		b.WriteString(w.help("↑↓ move · space toggle · enter next · esc quit"))
+	}
 	return b.String()
 }
 
@@ -313,6 +346,9 @@ func (w wizard) viewDone() string {
 
 func (w wizard) title(question string) string {
 	head := ansiDim + "dps — first run" + ansiReset
+	if w.colsOnly {
+		head = ansiDim + "dps — columns" + ansiReset
+	}
 	return "\n  " + head + "\n\n  " + ansiBold + question + ansiReset + "\n\n"
 }
 
@@ -335,6 +371,17 @@ func (w wizard) previewWidth() int {
 // projects and one container outside them, so grouped and flat actually look
 // different, which is the whole point of showing it.
 func preview(cols []table.Column, group bool, width, indent int) string {
+	// The sample has no daemon to sample, so the cpu column draws a fixed
+	// history. An empty graph would not show what the column is for.
+	cols = append([]table.Column(nil), cols...)
+	for i := range cols {
+		if cols[i].Key == "cpu" {
+			cols[i].Value = func(c model.Container) string {
+				return cpuCell(sampleCPU[c.ID], c.State == "running")
+			}
+		}
+	}
+
 	var b strings.Builder
 	_ = table.Render(&b, cols, sampleRows(), table.RenderOptions{
 		Width:  width,
@@ -391,6 +438,14 @@ func sampleRows() []model.Container {
 			Size: 29_000_000, Command: "postgres",
 		},
 	}
+}
+
+// sampleCPU is the CPU history the example rows draw, in percent.
+var sampleCPU = map[string][]float64{
+	"0dec549e57b9": {0.3, 0.2, 0.4, 0.3, 0.2, 0.5, 0.3, 0.2, 0.3, 0.4},
+	"5b1c8ad41f02": {12, 18, 35, 61, 88, 72, 44, 30, 22, 38.1},
+	"9f77e0b3c145": {2.1, 2.4, 1.9, 2.2, 6.8, 7.4, 2.3, 2.0, 2.2, 2.1},
+	"76ba0f5d3e88": {4, 4.2, 5.1, 9.8, 15.2, 14.9, 8.3, 5.2, 4.4, 4.6},
 }
 
 // shortenHome prints ~/… for a path under the home directory. The config path

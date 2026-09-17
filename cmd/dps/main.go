@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -61,6 +62,7 @@ func run() error {
 		savePres = flag.String("save-preset", "", "save the resulting columns under this name and exit")
 		showConf = flag.Bool("config", false, "print the config path and contents, then exit")
 		onboard  = flag.Bool("onboard", false, "run the first-run setup again, then exit")
+		pickCols = flag.Bool("pick-cols", false, "tick the default columns from a list, then exit")
 		listCols = flag.Bool("list-cols", false, "print the column catalog and exit")
 		watch    = flag.Int("w", 0, "redraw every N seconds")
 		showVer  = flag.Bool("version", false, "print version and exit")
@@ -96,6 +98,23 @@ func run() error {
 	defer stop()
 
 	isTTY := term.IsTTY(os.Stdout)
+
+	if *pickCols {
+		if !isTTY || !term.IsTTY(os.Stdin) {
+			return fmt.Errorf("--pick-cols needs a terminal on stdin and stdout; use --set-cols in a script")
+		}
+		keys, err := ui.PickColumns(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		if keys == nil {
+			fmt.Fprintln(os.Stderr, "dps: nothing saved")
+			return nil
+		}
+		path, _ := config.Path()
+		fmt.Printf("saved %s to %s\n", strings.Join(keys, ","), path)
+		return nil
+	}
 
 	// The wizard writes the config file, so it runs only when nothing else on
 	// this command line is already doing that job, and only on a machine that
@@ -180,6 +199,23 @@ func run() error {
 		return nil
 	}
 
+	// A terminal gets the interactive view. --plain and --json are explicit
+	// one-shot requests, and -w already owns its own redraw loop, so each of
+	// those keeps the plain path.
+	interactive := isTTY && !*plain && !*asJSON && *watch <= 0
+
+	// The cpu graph needs a history of samples, and only the interactive view
+	// keeps one. The plain table leaves the column out. It says so when the
+	// column was asked for on this command line, but not when it comes from
+	// the saved default — that would print the same warning on every
+	// `dps | grep`.
+	if !interactive && !*asJSON {
+		asked := *colsFlag != "" || *preset != ""
+		if cols, err = dropLiveOnly(cols, asked); err != nil {
+			return err
+		}
+	}
+
 	client, err := dockerapi.New(ctx)
 	if err != nil {
 		return err
@@ -192,12 +228,8 @@ func run() error {
 		}
 	}
 
-	// A terminal gets the interactive view. --plain and --json are explicit
-	// one-shot requests, and -w already owns its own redraw loop, so each of
-	// those keeps the plain path.
-	// A terminal gets the interactive view. The view draws groups itself now,
-	// so -g no longer has to divert away from it.
-	if isTTY && !*plain && !*asJSON && *watch <= 0 {
+	// The view draws groups itself, so -g does not have to divert away from it.
+	if interactive {
 		return ui.Run(ctx, client, cols, opt, groupRows)
 	}
 
@@ -239,6 +271,27 @@ func run() error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// dropLiveOnly removes the columns only the interactive view can fill.
+func dropLiveOnly(cols []table.Column, warn bool) ([]table.Column, error) {
+	out := make([]table.Column, 0, len(cols))
+	var dropped []string
+	for _, c := range cols {
+		if slices.Contains(table.LiveOnly, c.Key) {
+			dropped = append(dropped, c.Key)
+			continue
+		}
+		out = append(out, c)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s needs the interactive view; add another column, or run dps on a terminal",
+			strings.Join(dropped, ", "))
+	}
+	if warn && len(dropped) > 0 {
+		fmt.Fprintf(os.Stderr, "dps: %s left out — it needs the interactive view\n", strings.Join(dropped, ", "))
+	}
+	return out, nil
 }
 
 func writeJSON(containers []model.Container) error {

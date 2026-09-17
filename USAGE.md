@@ -145,6 +145,7 @@ every other unix tool does. Nothing about that is a flag — it follows stdout.
 | `-json` | One JSON record per line. |
 | `-config` | Print the config path and contents, then exit. |
 | `-onboard` | Run the first-run setup again, then exit. |
+| `-pick-cols` | Tick your default columns from a list, then exit. |
 | `-list-cols` | Print the column catalog, then exit. |
 | `-version` | Print the version, then exit. |
 
@@ -174,7 +175,9 @@ The interactive view opens when stdout is a terminal and you passed none of
 | `ctrl+u` `ctrl+d` | Move half a page |
 | `g` / `home`, `G` / `end` | First row, last row |
 | wheel | Scroll the window |
-| `e` | Open a shell in the selected container |
+| `s` | Open the stats view for the selected container |
+| `e` | Open a shell in the selected container, after you answer `y` |
+| `c` | Choose the columns |
 | `a` | Toggle stopped containers |
 | `r` | Refresh now, and say what changed |
 | `q`, `esc`, `ctrl+c` | Quit |
@@ -193,14 +196,60 @@ that it ran.
 
 ### Shell
 
-`e` opens a shell in the selected container, in the same terminal. It runs
-`bash` when the image has it and `sh` when it does not, so there is nothing to
-choose. Type `exit` or press `ctrl+d` to come back to the list, which is read
-again straight away.
+`e` asks first, on the status line:
+
+```
+open a shell in plane-app-api-1? y/n
+```
+
+`y` or `enter` opens the shell. Any other key cancels and does nothing else, so
+an `e` typed by accident costs one more key and no more.
+
+The shell opens in the same terminal. It runs `bash` when the image has it and
+`sh` when it does not, so there is nothing to choose. Type `exit` or press
+`ctrl+d` to come back to the list, which is read again straight away.
 
 A stopped container has no shell to open, and an image with no `/bin/sh` —
 distroless, `scratch` — has none to run. In both cases the status line says so
 and the list stays open.
+
+### Stats
+
+`s` opens the stats view for the selected container. It fills the window with
+four charts, updated every two seconds:
+
+| Chart | Shows |
+|---|---|
+| CPU | Share of one CPU, as `docker stats` prints it, so two full cores read 200% |
+| MEMORY | Memory in use, of the limit, without the page cache the kernel can take back |
+| DISK | Read and write rates side by side, with the totals |
+| NETWORK | Received (`in`) and sent (`out`) rates side by side, with the totals |
+
+The right end of each label gives the scale, for example `0–46%`. The top of a
+chart is a little above the highest value on it, but never less than a floor
+(10% CPU, 16MB memory, 100kB/s disk, 10kB/s network), so an idle container
+draws a flat line and not its own noise at full height.
+
+`↑` `↓` move to the next running container without leaving the view. `esc`,
+`q` or `s` go back to the list. The charts start empty and fill from the right;
+the history starts when the view first samples that container and is not kept
+after dps exits.
+
+### Choosing columns
+
+`c` opens a list of every column above the table. `space` ticks or unticks the
+one under the cursor, and the table below changes at once, with your real
+containers. `enter` saves the result as your default; `esc` puts the columns
+back as they were.
+
+The same list, without the table, runs from the shell:
+
+```sh
+dps --pick-cols
+```
+
+Columns you had keep their order. A column you tick goes in at its place in the
+catalog.
 
 ## Columns
 
@@ -212,6 +261,7 @@ and the list stays open.
 | `state` | STATE | Running state and uptime, e.g. `● up 3h` |
 | `image` | IMAGE | Image, with the registry stripped |
 | `ports` | PORTS | Published ports, compacted, e.g. `8090→80` |
+| `cpu` | CPU | CPU graph of the last 20 seconds and the latest share, e.g. `▁▂▅▇▅▃▂▁▁▂  12.4%` |
 | `health` | HEALTH | Healthcheck result |
 | `created` | CREATED | Age |
 | `project` | PROJECT | Compose project |
@@ -222,6 +272,14 @@ and the list stays open.
 | `cmd` | COMMAND | Entrypoint command |
 
 The default set is `name,state,image,ports`.
+
+`cpu` works in the interactive view only, because a graph needs a history and
+only the interactive view keeps one. The plain table and `-w` leave it out. When
+`--cols` or `--preset` asked for it, stderr says so; when it comes from your
+saved default, the table is quiet, so `dps | grep` does not warn on every run.
+The column samples each running container once every two seconds, and dps
+samples nothing when the column is not in the set. Its highest bar stops short
+of the full cell, so the graphs on two rows next to each other never touch.
 
 When the terminal is too narrow for every column, `dps` drops the lowest
 priority ones — but it says so on stderr rather than hiding data quietly:
@@ -235,8 +293,8 @@ being said out loud.
 
 ## Configuration
 
-Optional. The file is plain JSON, and `--set-cols` and `--save-preset` only
-write what you could have typed yourself.
+Optional. The file is plain JSON, and `--set-cols`, `--save-preset`,
+`--pick-cols` and the `c` key only write what you could have typed yourself.
 
 Location: `~/.config/dps/config.json`, or `$XDG_CONFIG_HOME/dps/config.json`
 when that variable is set. A missing file is not an error.
@@ -323,5 +381,7 @@ gofmt -l .
   run `dps` there.
 - It does not start, stop or remove containers. The only thing it runs inside
   one is the shell that `e` opens.
+- Stats history lives in memory. It starts when dps opens and is gone when dps
+  exits.
 - The `sort`, `strip_registry` and `strip_project_prefix` config keys are not
   implemented yet.

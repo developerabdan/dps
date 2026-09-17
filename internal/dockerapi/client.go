@@ -41,6 +41,10 @@ func New(ctx context.Context) (*Client, error) {
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					return (&net.Dialer{}).DialContext(ctx, "unix", sock)
 				},
+				// The cpu column reads stats for several containers at once.
+				// The default of two idle connections would close and dial
+				// most of them again on every poll.
+				MaxIdleConnsPerHost: StatsWorkers,
 			},
 		},
 	}
