@@ -2,17 +2,7 @@
 
 A readable `docker ps`.
 
-```
-NAME           STATE    IMAGE                           PORTS
-plane-app  12/12 up
-  proxy        ● up 3h  plane-proxy:v1.3.1              8090→80
-  admin        ● up 3h  plane-admin:v1.3.1              —
-  web          ● up 3h  plane-frontend:v1.3.1           —
-  api          ● up 3h  plane-backend:v1.3.1            —
-  plane-db     ● up 3h  postgres:15.7-alpine            —
-  plane-redis  ● up 3h  valkey:7.2.11-alpine            —
-6 containers · project plane-app · 6 up
-```
+![dps shows containers grouped by Compose project](.github/assets/intro-dps.gif)
 
 ## Features
 
