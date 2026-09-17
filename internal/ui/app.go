@@ -39,10 +39,33 @@ const chromeLines = 4
 // scrollJump is how far one wheel notch moves the window.
 const scrollJump = 3
 
+// noticeFor is how long a one-off message stays on the status line: long
+// enough to read four words, short enough to be gone before the next key.
+const noticeFor = 2 * time.Second
+
+// flashFor is how long a changed row stays bold. It is shorter than
+// refreshInterval, so a row that changed on one poll is plain again before the
+// next poll can mark it.
+const flashFor = 1500 * time.Millisecond
+
 type (
-	rowsMsg []model.Container
-	errMsg  struct{ err error }
-	tickMsg struct{}
+	// rowsMsg carries one fetch. manual marks the fetch that r asked for,
+	// because only that one reports its result on the status line — the
+	// background poll runs every two seconds and would never be quiet.
+	rowsMsg struct {
+		rows   []model.Container
+		manual bool
+	}
+	errMsg        struct{ err error }
+	tickMsg       struct{}
+	noticeDoneMsg struct{ gen int }
+	flashDoneMsg  struct{ gen int }
+	shellDoneMsg  struct {
+		name  string
+		code  int
+		typed bool
+		err   error
+	}
 )
 
 // Model is the Bubble Tea model backing the interactive table.
@@ -69,6 +92,22 @@ type Model struct {
 	// thing — otherwise the highlight lands on a different container than
 	// the one the arrow keys moved to.
 	group bool
+
+	// notice is a one-off message at the front of the status line, drawn in
+	// noticeColor. noticeGen numbers each message, so a timer set for an old
+	// one cannot clear a newer one that replaced it.
+	notice      string
+	noticeColor string
+	noticeGen   int
+	refreshing  bool
+
+	// seen is what each container looked like at the last fetch, and flash
+	// holds the rows that differ from it, drawn bold for flashFor. A nil seen
+	// means there is nothing to compare with yet — the first fetch, or the
+	// first after `a` changed which containers are listed — so nothing flashes.
+	seen     map[string]string
+	flash    map[string]bool
+	flashGen int
 }
 
 // Run opens the interactive view and blocks until the user quits.
@@ -87,7 +126,7 @@ func Run(ctx context.Context, client *dockerapi.Client, cols []table.Column, opt
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetch(), tick())
+	return tea.Batch(m.fetch(false), tick())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -103,10 +142,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Store rows in the order they will be drawn. The cursor is a single
 		// index into this slice, so if the display order differed the
 		// highlight would fall on the wrong container.
-		m.rows = msg
+		m.rows = msg.rows
 		if m.group {
-			ordered := make([]model.Container, 0, len(msg))
-			for _, g := range table.GroupByProject(msg) {
+			ordered := make([]model.Container, 0, len(msg.rows))
+			for _, g := range table.GroupByProject(msg.rows) {
 				ordered = append(ordered, g.Rows...)
 			}
 			m.rows = ordered
@@ -114,14 +153,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.clampCursor()
 		m.ensureVisible()
-		return m, nil
+
+		var cmds []tea.Cmd
+		d := m.diff()
+		if len(d.marked) > 0 {
+			cmds = append(cmds, m.startFlash(d.marked))
+		}
+		if msg.manual {
+			m.refreshing = false
+			cmds = append(cmds, m.say(ansiGreen, "↻ refreshed · "+d.summary()))
+		}
+		return m, tea.Batch(cmds...)
 
 	case errMsg:
 		m.err = msg.err
+		if m.refreshing {
+			m.refreshing = false
+			m.notice = ""
+		}
 		return m, nil
 
 	case tickMsg:
-		return m, tea.Batch(m.fetch(), tick())
+		return m, tea.Batch(m.fetch(false), tick())
+
+	case noticeDoneMsg:
+		if msg.gen == m.noticeGen {
+			m.notice = ""
+		}
+		return m, nil
+
+	case flashDoneMsg:
+		if msg.gen == m.flashGen {
+			m.flash = nil
+		}
+		return m, nil
+
+	case shellDoneMsg:
+		// Whatever happened in the shell may have changed the list, so it is
+		// read again straight away rather than on the next poll.
+		cmds := []tea.Cmd{m.fetch(false)}
+		switch {
+		case msg.err != nil:
+			cmds = append(cmds, m.say(ansiRed, "shell failed: "+msg.err.Error()))
+		case noShell(msg.code, msg.typed):
+			cmds = append(cmds, m.say(ansiYellow, msg.name+" has no shell to open"))
+		}
+		return m, tea.Batch(cmds...)
 
 	case tea.MouseWheelMsg:
 		switch msg.Button {
@@ -159,9 +236,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.opt.All = !m.opt.All
 			m.cursor = 0
 			m.offset = 0
-			return m, m.fetch()
+			// The next list is a different set of containers, not a newer
+			// version of this one, so none of it should flash as changed.
+			m.seen = nil
+			return m, m.fetch(false)
 		case "r":
-			return m, m.fetch()
+			// Most refreshes change nothing, and a list that looks the same
+			// after the key looks like the key did nothing. The status line
+			// says it is working, then says what it found.
+			m.refreshing = true
+			m.noticeGen++
+			m.notice, m.noticeColor = "↻ refreshing…", ansiDim
+			return m, m.fetch(true)
+		case "e":
+			return m.openShell()
 		}
 	}
 	return m, nil
@@ -226,9 +314,12 @@ func (m Model) View() tea.View {
 				}
 				cells[j] = v
 			}
-			if s.row == m.cursor {
+			switch {
+			case s.row == m.cursor:
 				b.WriteString(ansiReverse + m.line(active, widths, cells) + ansiReset)
-			} else {
+			case m.flash[rowKey(r)]:
+				b.WriteString(bold(colorize(active, r, cells, widths, m.line)))
+			default:
 				b.WriteString(colorize(active, r, cells, widths, m.line))
 			}
 		case s.heading != "":
@@ -442,20 +533,35 @@ func (m Model) status(dropped []table.Column, clipped bool) string {
 		hidden = " · hidden: " + strings.Join(keys, ", ")
 	}
 
+	// The notice goes first, so a narrow window cuts the counts rather than the
+	// one thing that just changed.
+	lead, room := "", m.width
+	if m.notice != "" {
+		n := table.Truncate(m.notice, m.width, table.TruncTail)
+		lead = m.noticeColor + n + ansiReset
+		room -= table.Width(n)
+		const sep = " · "
+		if room <= table.Width(sep) {
+			return lead
+		}
+		lead += ansiDim + sep + ansiReset
+		room -= table.Width(sep)
+	}
+
 	// Colour is added after the length test because ANSI codes print no cells
 	// but do count as runes, and a wrapped status line would push the help off
 	// the screen.
-	if table.Width(text+hidden) > m.width {
-		return ansiDim + table.Truncate(text+hidden, m.width, table.TruncTail) + ansiReset
+	if table.Width(text+hidden) > room {
+		return lead + ansiDim + table.Truncate(text+hidden, room, table.TruncTail) + ansiReset
 	}
 	if hidden == "" {
-		return ansiDim + text + ansiReset
+		return lead + ansiDim + text + ansiReset
 	}
-	return ansiDim + text + ansiReset + ansiYellow + hidden + ansiReset
+	return lead + ansiDim + text + ansiReset + ansiYellow + hidden + ansiReset
 }
 
 func (m Model) help() string {
-	keys := "↑↓ move · PgUp/PgDn page · a toggle stopped · r refresh · q quit"
+	keys := "↑↓ move · PgUp/PgDn page · e shell · a toggle stopped · r refresh · q quit"
 	return ansiDim + table.Truncate(keys, m.width, table.TruncTail) + ansiReset
 }
 
@@ -468,14 +574,128 @@ func (m *Model) clampCursor() {
 	}
 }
 
-func (m Model) fetch() tea.Cmd {
+func (m Model) fetch(manual bool) tea.Cmd {
 	return func() tea.Msg {
 		rows, err := m.client.ListContainers(m.ctx, m.opt)
 		if err != nil {
 			return errMsg{err}
 		}
-		return rowsMsg(rows)
+		return rowsMsg{rows: rows, manual: manual}
 	}
+}
+
+// openShell hands the terminal to a shell in the selected container. A
+// container that is not running has no process to exec into, and the daemon
+// would only answer 409, so that is said on the status line instead.
+func (m Model) openShell() (tea.Model, tea.Cmd) {
+	if len(m.rows) == 0 {
+		return m, nil
+	}
+	r := m.rows[m.cursor]
+	if r.State != "running" {
+		return m, m.say(ansiYellow, r.Name+" is not running")
+	}
+	if m.client == nil {
+		return m, nil
+	}
+	sh := &shell{ctx: m.ctx, client: m.client, id: r.ID, name: r.Name}
+	return m, tea.Exec(sh, func(err error) tea.Msg {
+		return shellDoneMsg{name: sh.name, code: sh.code, typed: sh.typed.Load(), err: err}
+	})
+}
+
+// say puts text at the front of the status line and returns the timer that
+// takes it away again.
+func (m *Model) say(color, text string) tea.Cmd {
+	m.noticeGen++
+	m.notice, m.noticeColor = text, color
+	gen := m.noticeGen
+	return tea.Tick(noticeFor, func(time.Time) tea.Msg { return noticeDoneMsg{gen} })
+}
+
+func (m *Model) startFlash(keys map[string]bool) tea.Cmd {
+	m.flashGen++
+	m.flash = keys
+	gen := m.flashGen
+	return tea.Tick(flashFor, func(time.Time) tea.Msg { return flashDoneMsg{gen} })
+}
+
+// rowDiff is what changed between two fetches.
+type rowDiff struct {
+	added, changed, gone int
+	// marked is every row still on the list that is new or different.
+	marked map[string]bool
+}
+
+// diff compares m.rows with the previous fetch and records m.rows as the new
+// baseline.
+func (m *Model) diff() rowDiff {
+	next := make(map[string]string, len(m.rows))
+	for _, r := range m.rows {
+		next[rowKey(r)] = rowSig(r)
+	}
+	prev := m.seen
+	m.seen = next
+
+	d := rowDiff{marked: map[string]bool{}}
+	if prev == nil {
+		return d
+	}
+	for k, sig := range next {
+		old, ok := prev[k]
+		switch {
+		case !ok:
+			d.added++
+			d.marked[k] = true
+		case old != sig:
+			d.changed++
+			d.marked[k] = true
+		}
+	}
+	for k := range prev {
+		if _, ok := next[k]; !ok {
+			d.gone++
+		}
+	}
+	return d
+}
+
+func (d rowDiff) summary() string {
+	var parts []string
+	if d.added > 0 {
+		parts = append(parts, fmt.Sprintf("%d new", d.added))
+	}
+	if d.changed > 0 {
+		parts = append(parts, fmt.Sprintf("%d changed", d.changed))
+	}
+	if d.gone > 0 {
+		parts = append(parts, fmt.Sprintf("%d gone", d.gone))
+	}
+	if len(parts) == 0 {
+		return "no changes"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func rowKey(r model.Container) string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return r.Name
+}
+
+// rowSig is the part of a container that counts as a change. Status is left
+// out on purpose: its text is "Up 3 minutes", which changes every minute on
+// its own, and a row that flashes for the clock teaches people to ignore the
+// flash.
+func rowSig(r model.Container) string {
+	return fmt.Sprint(r.State, "|", r.Health, "|", r.Image, "|", r.Ports)
+}
+
+// bold draws an already coloured line in bold. Each reset inside the line
+// would end the bold early, so bold is opened again after every one of them.
+func bold(line string) string {
+	return ansiBold + strings.ReplaceAll(line, ansiReset, ansiReset+ansiBold) + ansiReset
 }
 
 func tick() tea.Cmd {

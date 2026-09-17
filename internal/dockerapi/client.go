@@ -1,6 +1,7 @@
 package dockerapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -59,7 +60,7 @@ func (c *Client) Socket() string { return c.sock }
 // A pinned /v1.41/ prefix is rejected outright by Docker 29.0 through 29.2,
 // which raised their floor to 1.44 before 29.3 lowered it again.
 func (c *Client) negotiate(ctx context.Context) error {
-	rc, err := c.raw(ctx, http.MethodGet, "/version", nil)
+	rc, err := c.raw(ctx, http.MethodGet, "/version", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -111,21 +112,18 @@ func splitVersion(v string) (int, int) {
 // get issues a version-prefixed request. Unversioned calls are deprecated by
 // the Engine API, so every endpoint except /version goes through here.
 func (c *Client) get(ctx context.Context, path string, q url.Values) (io.ReadCloser, error) {
-	return c.raw(ctx, http.MethodGet, "/v"+c.api+path, q)
+	return c.raw(ctx, http.MethodGet, "/v"+c.api+path, q, nil)
 }
 
-func (c *Client) post(ctx context.Context, path string, q url.Values) (io.ReadCloser, error) {
-	return c.raw(ctx, http.MethodPost, "/v"+c.api+path, q)
+// post sends body as JSON when it is not nil.
+func (c *Client) post(ctx context.Context, path string, q url.Values, body []byte) (io.ReadCloser, error) {
+	return c.raw(ctx, http.MethodPost, "/v"+c.api+path, q, body)
 }
 
 // raw performs the request. The host in the URL is a placeholder; the dialer
 // ignores it and connects to the socket.
-func (c *Client) raw(ctx context.Context, method, path string, q url.Values) (io.ReadCloser, error) {
-	u := "http://docker" + path
-	if len(q) > 0 {
-		u += "?" + q.Encode()
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u, nil)
+func (c *Client) raw(ctx context.Context, method, path string, q url.Values, body []byte) (io.ReadCloser, error) {
+	req, err := c.request(ctx, method, path, q, body)
 	if err != nil {
 		return nil, err
 	}
@@ -134,10 +132,35 @@ func (c *Client) raw(ctx context.Context, method, path string, q url.Values) (io
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		resp.Body.Close()
-		return nil, fmt.Errorf("docker %s %s: %s: %s",
-			method, path, resp.Status, strings.TrimSpace(string(body)))
+		return nil, statusError(method, path, resp)
 	}
 	return resp.Body, nil
+}
+
+func (c *Client) request(ctx context.Context, method, path string, q url.Values, body []byte) (*http.Request, error) {
+	u := "http://docker" + path
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, r)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req, nil
+}
+
+// statusError reads the start of a failed response into the error, because
+// the daemon puts the reason in the body and the status alone rarely says it.
+func statusError(method, path string, resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	resp.Body.Close()
+	return fmt.Errorf("docker %s %s: %s: %s",
+		method, path, resp.Status, strings.TrimSpace(string(body)))
 }

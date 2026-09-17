@@ -37,7 +37,7 @@ every other unix tool does. Nothing about that is a flag — it follows stdout.
 |---|---|
 | Docker Engine | Any daemon that answers `GET /version`. `dps` asks for API 1.44 and then clamps to whatever the daemon reports it supports, so old and new engines both work. |
 | A unix socket | `dps` speaks to unix sockets only. `DOCKER_HOST=tcp://…` and `ssh://…` are refused with an error, not a silent fallback. |
-| Read access to that socket | Your user must be in the `docker` group, or run as root. `dps` only ever reads — `GET /version` and `GET /containers/json`. It never starts, stops or removes anything. |
+| Access to that socket | Your user must be in the `docker` group, or run as root. `dps` reads `GET /version` and `GET /containers/json`. The one thing it ever writes is the shell that `e` opens, through the exec endpoints. It never starts, stops or removes a container. |
 | A UTF-8 terminal | The table uses `●`, `→` and `…`. A latin-1 terminal shows mojibake instead. |
 
 No daemon, no agent, no config file is needed. A machine that has never seen
@@ -208,8 +208,9 @@ The interactive view opens when stdout is a terminal and you passed none of
 | `ctrl+u` `ctrl+d` | Move half a page |
 | `g` / `home`, `G` / `end` | First row, last row |
 | wheel | Scroll the window |
+| `e` | Open a shell in the selected container |
 | `a` | Toggle stopped containers |
-| `r` | Refresh now |
+| `r` | Refresh now, and say what changed |
 | `q`, `esc`, `ctrl+c` | Quit |
 
 The list scrolls inside the window — it never asks for a taller terminal. While
@@ -217,7 +218,23 @@ the list is longer than the window the status line says which row you are on,
 for example `row 12/37`. A cursor on the first row of a project keeps that
 project's heading on screen.
 
-The view refreshes every two seconds.
+The view refreshes every two seconds. A row that is new, or whose state,
+health, image or ports changed since the last refresh, is drawn bold for a
+moment. Uptime text alone does not count — it changes every minute by itself.
+`r` refreshes at once and puts the result on the status line, for example
+`↻ refreshed · 1 changed, 1 gone`, so a refresh that found nothing still shows
+that it ran.
+
+### Shell
+
+`e` opens a shell in the selected container, in the same terminal. It runs
+`bash` when the image has it and `sh` when it does not, so there is nothing to
+choose. Type `exit` or press `ctrl+d` to come back to the list, which is read
+again straight away.
+
+A stopped container has no shell to open, and an image with no `/bin/sh` —
+distroless, `scratch` — has none to run. In both cases the status line says so
+and the list stays open.
 
 ## Columns
 
@@ -330,7 +347,8 @@ gofmt -l .
 
 - Unix sockets only. No `tcp://`, no `ssh://`. To read a remote host, ssh in and
   run `dps` there.
-- Read-only. It shows containers; it does not stop, start or remove them.
+- It does not start, stop or remove containers. The only thing it runs inside
+  one is the shell that `e` opens.
 - The `sort`, `strip_registry` and `strip_project_prefix` config keys are not
   implemented yet.
 

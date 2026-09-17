@@ -35,7 +35,7 @@ func newModel(n int, grouped bool, width, height int) Model {
 		width:  width,
 		height: height,
 	}
-	next, _ := m.Update(rowsMsg(rows(n, grouped)))
+	next, _ := m.Update(rowsMsg{rows: rows(n, grouped)})
 	return next.(Model)
 }
 
@@ -149,7 +149,7 @@ func TestFewerRowsPullsWindowBack(t *testing.T) {
 	m := newModel(37, false, 120, 24)
 	m.cursor = 36
 	m.ensureVisible()
-	next, _ := m.Update(rowsMsg(rows(3, false)))
+	next, _ := m.Update(rowsMsg{rows: rows(3, false)})
 	m = next.(Model)
 	if m.offset != 0 {
 		t.Errorf("offset %d after the list shrank, want 0", m.offset)
