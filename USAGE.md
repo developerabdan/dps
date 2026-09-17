@@ -98,6 +98,28 @@ Run the same `curl` line again to upgrade; it overwrites the binary in place.
 To remove it, delete the one file: `sudo rm /usr/local/bin/dps`, and
 `rm -rf ~/.config/dps` if you saved a column set.
 
+When a newer release is out, `dps` says so before the view opens:
+
+```
+  Update available: v1.0.0 → v1.1.0
+
+  Run this to update:
+    curl -fsSL https://raw.githubusercontent.com/developerabdan/dps/main/install.sh | sh
+
+  [ enter ] continue
+```
+
+`enter` opens the view as usual, and `ctrl-c` exits. `dps` never updates
+itself; the upgrade is the `curl` line, run by you.
+
+The check asks the GitHub releases API at most once a day, with a two-second
+limit, and keeps the answer in `update.json` in your user cache directory
+(`~/.cache/dps`, or `$XDG_CACHE_HOME/dps`, on Linux; `~/Library/Caches/dps`
+on macOS). If GitHub cannot
+be reached, `dps` starts without the notice. The notice shows only on a
+terminal, never with `--plain`, `--json` or in a pipe, and never on a build
+from source. To turn the check off, set `DPS_NO_UPDATE_CHECK=1`.
+
 ## First run
 
 The first `dps` on a machine with no config file opens a short setup, then

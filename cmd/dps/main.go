@@ -24,6 +24,7 @@ import (
 	"github.com/developerabdan/dps/internal/table"
 	"github.com/developerabdan/dps/internal/term"
 	"github.com/developerabdan/dps/internal/ui"
+	"github.com/developerabdan/dps/internal/update"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=...".
@@ -219,6 +220,17 @@ func run() error {
 	client, err := dockerapi.New(ctx)
 	if err != nil {
 		return err
+	}
+
+	// A newer release is announced only to a person at a terminal, and only
+	// before a view they are about to watch. The notice waits for enter, so a
+	// pipe, --plain or --json must never reach it.
+	if isTTY && term.IsTTY(os.Stdin) && !*plain && !*asJSON {
+		if latest := update.Available(ctx, version); latest != "" {
+			if !update.Prompt(ctx, os.Stdin, os.Stdout, version, latest) {
+				return nil
+			}
+		}
 	}
 
 	opt := dockerapi.ListOptions{All: *all, Filters: filters}
