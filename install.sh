@@ -210,17 +210,21 @@ latest_version() {
 
 # verify compares the downloaded asset with its line in checksums.txt. A missing
 # sha256 tool stops the install; set DPS_SKIP_CHECKSUM=1 to accept that risk.
+#
+# sh has no portable local, so every function writes the variables of main. The
+# download directory is therefore called tmpdir here: a dir= line would replace
+# the install directory, and place would then copy the binary onto itself.
 verify() {
-	dir=$1
+	tmpdir=$1
 	name=$2
 
-	expected=$(sed -n "s/^\([0-9a-f]*\)  *$name\$/\1/p" "$dir/checksums.txt" | head -n 1)
+	expected=$(sed -n "s/^\([0-9a-f]*\)  *$name\$/\1/p" "$tmpdir/checksums.txt" | head -n 1)
 	[ -n "$expected" ] || err "checksums.txt has no line for $name"
 
 	if command -v sha256sum >/dev/null 2>&1; then
-		actual=$(sha256sum "$dir/$name" | cut -d' ' -f1)
+		actual=$(sha256sum "$tmpdir/$name" | cut -d' ' -f1)
 	elif command -v shasum >/dev/null 2>&1; then
-		actual=$(shasum -a 256 "$dir/$name" | cut -d' ' -f1)
+		actual=$(shasum -a 256 "$tmpdir/$name" | cut -d' ' -f1)
 	elif [ "${DPS_SKIP_CHECKSUM:-0}" = 1 ]; then
 		info "no sha256 tool — skipping the checksum, as DPS_SKIP_CHECKSUM asks"
 		return 0
