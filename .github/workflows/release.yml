@@ -45,7 +45,7 @@ jobs:
               -trimpath \
               -ldflags "-s -w -X main.version=${VERSION}" \
               -o "$stage/dps" ./cmd/dps
-            cp LICENSE README.md "$stage/"
+            cp LICENSE README.md USAGE.md "$stage/"
             tar -czf "${stage}.tar.gz" -C "$stage" .
             rm -rf "$stage"
           done
