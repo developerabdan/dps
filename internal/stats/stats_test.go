@@ -102,19 +102,6 @@ func TestSparkNeverUsesTheFullBlock(t *testing.T) {
 	}
 }
 
-func TestChartStacksEighths(t *testing.T) {
-	// Two lines give sixteen steps: 10 of 16 fills the bottom line and two
-	// steps of the top one.
-	lines := Chart([]float64{10, 0}, 2, 2, 16)
-	if lines[0] != "▂ " || lines[1] != "█ " {
-		t.Errorf("chart = %q", lines)
-	}
-	// A value too small for one step still shows.
-	if got := Chart([]float64{0.01}, 1, 1, 100)[0]; got != "▁" {
-		t.Errorf("small value drew %q", got)
-	}
-}
-
 func TestTopHasAFloor(t *testing.T) {
 	if got := Top(10, 1, []float64{0.1, 0.3}); got != 10 {
 		t.Errorf("top = %v, want the floor", got)
@@ -143,4 +130,53 @@ func TestLongGapStartsTheHistoryAgain(t *testing.T) {
 	if s.CPU.Len() != 0 || s.Mem.Len() != 1 {
 		t.Errorf("after a 2m gap: %d cpu values, %d memory values; want 0 and 1", s.CPU.Len(), s.Mem.Len())
 	}
+}
+
+func TestDotsPackTwoColumnsInACell(t *testing.T) {
+	// One cell, the first value at the floor and the second at the top: the
+	// left column has its bottom dot, the right one is filled from top to
+	// bottom by the join between them.
+	g := Dots([]float64{0, 100}, 1, 1, 100)
+	if got := Dot(g.At(0, 0)); got != '⣸' {
+		t.Errorf("cell = %q, want ⣸", got)
+	}
+}
+
+func TestDotsJoinConsecutiveValues(t *testing.T) {
+	// Without the join a jump would draw two marks with a gap between them.
+	// Every row of the grid must have a dot somewhere.
+	g := Dots([]float64{0, 100, 0, 100}, 2, 4, 100)
+	for row := range g {
+		empty := true
+		for _, mask := range g[row] {
+			empty = empty && mask == 0
+		}
+		if empty {
+			t.Errorf("row %d of the chart has no dots", row)
+		}
+	}
+}
+
+func TestDotsGrowInFromTheRight(t *testing.T) {
+	g := Dots([]float64{50}, 4, 1, 100)
+	for col := range 3 {
+		if g.At(0, col) != 0 {
+			t.Errorf("cell %d has dots, want the chart to start at the right", col)
+		}
+	}
+	if g.At(0, 3) == 0 {
+		t.Error("the newest value drew nothing")
+	}
+}
+
+func TestDotsAreTheAskedForSize(t *testing.T) {
+	g := Dots([]float64{1, 2, 3}, 5, 2, 3)
+	if len(g) != 2 || len(g[0]) != 5 {
+		t.Errorf("grid is %dx%d, want 5x2", len(g[0]), len(g))
+	}
+	if got := Dot(0); got != ' ' {
+		t.Errorf("an empty cell is %q, want a space", got)
+	}
+	// A size of nothing must not panic.
+	Dots([]float64{1}, 0, 0, 1)
 }

@@ -124,3 +124,40 @@ func TestStatsArrowsPassOverStoppedContainers(t *testing.T) {
 		t.Errorf("down went to %q, want id-03", m.statsKey)
 	}
 }
+
+func TestStatsFramesTheChartsOnlyWhenTall(t *testing.T) {
+	view := func(height int) string {
+		m := Model{cols: mustCols(t, "name", "state"), width: 100, height: height}
+		m = feed(m, fleet(2), false)
+		m = pressKey(m, "s")
+		for sec := 0; sec <= 20; sec += 2 {
+			m = feedStats(m, map[string]model.Sample{"id-00": busy(sec, uint64(sec*100))})
+		}
+		return stripANSI(m.View().Content)
+	}
+
+	tall := view(52)
+	for _, want := range []string{"┌", "└", "│", "now", "ago"} {
+		if !strings.Contains(tall, want) {
+			t.Errorf("a tall window has no %q:\n%s", want, tall)
+		}
+	}
+	// Every box starts in the same column, whatever its scale reads.
+	col := -1
+	for _, l := range strings.Split(tall, "\n") {
+		i := strings.Index(l, "┌")
+		if i < 0 {
+			continue
+		}
+		if col >= 0 && i != col {
+			t.Errorf("a box starts at column %d, another at %d", col, i)
+		}
+		col = i
+	}
+
+	if short := view(30); strings.Contains(short, "┌") {
+		t.Errorf("a short window drew a frame:\n%s", short)
+	} else if !strings.Contains(short, "0–") {
+		t.Errorf("a short window has no scale on its labels:\n%s", short)
+	}
+}

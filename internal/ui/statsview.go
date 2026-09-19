@@ -2,7 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -18,6 +20,19 @@ const statsIndent = "  "
 // the blank under it, one label for each of the four panels, the three blanks
 // between them, and the blank, status and help at the bottom.
 const statsFixed = 2 + 4 + 3 + 3
+
+// statsFramedFixed is the same count for the framed view, where each panel
+// also has the two sides of its box and a line of times under it.
+const statsFramedFixed = 2 + 4*4 + 3 + 3
+
+// minFramedChart is the shortest chart worth a frame. Below it the four lines
+// the frame costs are better spent on the chart itself, so the view drops the
+// box and puts the scale back on the label line.
+const minFramedChart = 4
+
+// minFramedInner is the narrowest chart worth a frame, for the same reason:
+// the box and its scale take cells from the side.
+const minFramedInner = 20
 
 // maxChartHeight stops the charts at a height where one more line adds no
 // detail anyone reads. A tall window keeps the rest empty.
@@ -94,7 +109,13 @@ func (m Model) viewStats() string {
 	running := r.State == "running"
 
 	width := max(m.width-2*len(statsIndent), 8)
+	// The frame is worth its lines only in a window tall enough to keep the
+	// charts readable with them gone. A short window gets the bare charts.
+	framed := false
 	height := min(maxChartHeight, max(1, (m.height-statsFixed)/4))
+	if h := min(maxChartHeight, (m.height-statsFramedFixed)/4); h >= minFramedChart {
+		framed, height = true, h
+	}
 
 	lines := []string{statsIndent + fit(width,
 		seg{m.statsName, ansiBold},
@@ -103,41 +124,74 @@ func (m Model) viewStats() string {
 	), ""}
 
 	cpu := s.CPU.Values()
-	cpuText, cpuNote := reading(&s.CPU, running, func(v float64) string {
-		return strings.TrimSpace(stats.Percent(v))
-	}), ""
+	cpuNote := ""
 	if n := s.Latest.OnlineCPUs; n > 0 {
 		cpuNote = fmt.Sprintf(" · %d CPUs", n)
 	}
-	top := stats.Top(cpuFloor, chartHeadroom, cpu)
-	lines = append(lines, panel("CPU", cpuText, cpuNote,
-		"0–"+strings.TrimSpace(stats.Percent(top)), cpu, top, width, height)...)
-	lines = append(lines, "")
+	cpuTop := stats.Top(cpuFloor, chartHeadroom, cpu)
+	panels := []chartPanel{{
+		name: "CPU",
+		head: []seg{
+			{reading(&s.CPU, running, func(v float64) string {
+				return strings.TrimSpace(stats.Percent(v))
+			}), ""},
+			{cpuNote, ansiDim},
+		},
+		scale: strings.TrimSpace(stats.Percent(cpuTop)),
+		top:   cpuTop,
+		lines: []chartLine{{cpu, ansiCyan}},
+	}}
 
 	mem := s.Mem.Values()
 	memNote := ""
 	if limit, used := float64(s.Latest.MemLimit), float64(s.Latest.MemUsage); limit > 0 && s.Mem.Len() > 0 {
 		memNote = fmt.Sprintf(" / %s · %.1f%%", stats.Bytes(limit), used/limit*100)
 	}
-	top = stats.Top(memFloor, chartHeadroom, mem)
-	lines = append(lines, panel("MEMORY", reading(&s.Mem, running, stats.Bytes), memNote,
-		"0–"+stats.Bytes(top), mem, top, width, height)...)
-	lines = append(lines, "")
+	memTop := stats.Top(memFloor, chartHeadroom, mem)
+	panels = append(panels, chartPanel{
+		name:  "MEMORY",
+		head:  []seg{{reading(&s.Mem, running, stats.Bytes), ""}, {memNote, ansiDim}},
+		scale: stats.Bytes(memTop),
+		top:   memTop,
+		lines: []chartLine{{mem, ansiCyan}},
+	})
 
 	read, write := s.DiskRead.Values(), s.DiskWrite.Values()
-	top = stats.Top(diskFloor, chartHeadroom, read, write)
-	lines = append(lines, dualPanel("DISK",
-		half{"read", reading(&s.DiskRead, running, stats.Rate), s.Latest.DiskRead, read},
-		half{"write", reading(&s.DiskWrite, running, stats.Rate), s.Latest.DiskWrite, write},
-		"0–"+stats.Rate(top), top, width, height)...)
-	lines = append(lines, "")
+	diskTop := stats.Top(diskFloor, chartHeadroom, read, write)
+	panels = append(panels, chartPanel{
+		name: "DISK",
+		head: pair(
+			part{"read", reading(&s.DiskRead, running, stats.Rate), s.Latest.DiskRead},
+			part{"write", reading(&s.DiskWrite, running, stats.Rate), s.Latest.DiskWrite}),
+		scale: stats.Rate(diskTop),
+		top:   diskTop,
+		lines: []chartLine{{read, ansiCyan}, {write, ansiYellow}},
+	})
 
 	rx, tx := s.NetRx.Values(), s.NetTx.Values()
-	top = stats.Top(netFloor, chartHeadroom, rx, tx)
-	lines = append(lines, dualPanel("NETWORK",
-		half{"in", reading(&s.NetRx, running, stats.Rate), s.Latest.NetRx, rx},
-		half{"out", reading(&s.NetTx, running, stats.Rate), s.Latest.NetTx, tx},
-		"0–"+stats.Rate(top), top, width, height)...)
+	netTop := stats.Top(netFloor, chartHeadroom, rx, tx)
+	panels = append(panels, chartPanel{
+		name: "NETWORK",
+		head: pair(
+			part{"in", reading(&s.NetRx, running, stats.Rate), s.Latest.NetRx},
+			part{"out", reading(&s.NetTx, running, stats.Rate), s.Latest.NetTx}),
+		scale: stats.Rate(netTop),
+		top:   netTop,
+		lines: []chartLine{{rx, ansiCyan}, {tx, ansiYellow}},
+	})
+
+	// One gutter for every panel, so the boxes stand in a column rather than
+	// each starting where its own scale happens to end.
+	gutter := 0
+	for _, p := range panels {
+		gutter = max(gutter, table.Width(p.scale))
+	}
+	for i, p := range panels {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, p.render(width, height, gutter, framed)...)
+	}
 
 	// The frame must not be taller than the window, so a short window loses
 	// the bottom of the charts rather than the status and help lines.
@@ -182,47 +236,153 @@ func reading(r *stats.Ring, running bool, format func(float64) string) string {
 	return table.Empty
 }
 
-// panel is one chart the full width of the view, under a label line.
-func panel(name, value, note, scale string, values []float64, top float64, width, height int) []string {
-	out := []string{statsIndent + label(width,
-		[]seg{{table.Pad(name, 9), ansiBold}, {value, ""}, {note, ansiDim}},
-		seg{scale, ansiDim})}
-	for _, l := range stats.Chart(values, width, height, top) {
-		out = append(out, statsIndent+ansiCyan+l+ansiReset)
-	}
-	return out
+// chartPanel is one block of the stats view: a label line and, under it, the
+// chart of one or two series.
+type chartPanel struct {
+	name  string
+	head  []seg
+	scale string // what the top of the chart stands for
+	top   float64
+	lines []chartLine
 }
 
-// half is one side of a panel that draws two series, such as read and write.
-type half struct {
-	name   string
-	value  string
-	total  uint64
+// chartLine is one series and the colour it is drawn in. Where two series
+// share a cell the first one gives it its colour, so the colour of the name
+// on the label line is the key to the chart.
+type chartLine struct {
 	values []float64
+	color  string
 }
 
-// dualPanel draws two series side by side on one scale, so the larger one can
-// be seen to be larger.
-func dualPanel(name string, a, b half, scale string, top float64, width, height int) []string {
-	const gap = "   "
-	left := (width - len(gap)) / 2
-	right := width - len(gap) - left
+// part is one of the two series of a panel that draws a pair, such as the
+// read and write sides of DISK.
+type part struct {
+	name  string
+	value string
+	total uint64
+}
 
-	head := fit(left,
-		seg{table.Pad(name, 9), ansiBold},
-		seg{a.name + " " + a.value, ""},
-		seg{" · " + stats.Bytes(float64(a.total)) + " total", ansiDim})
-	head += strings.Repeat(" ", left+len(gap)-visibleWidth(head))
-	head += label(right,
-		[]seg{{b.name + " " + b.value, ""}, {" · " + stats.Bytes(float64(b.total)) + " total", ansiDim}},
-		seg{scale, ansiDim})
+// pair writes the label line of a panel that draws two series. The name of
+// each one takes the colour of its line, which is the only legend the chart
+// needs.
+func pair(a, b part) []seg {
+	return []seg{
+		{a.name + " ", ansiCyan}, {a.value, ""},
+		{" · " + stats.Bytes(float64(a.total)) + " total", ansiDim},
+		{"   ", ""},
+		{b.name + " ", ansiYellow}, {b.value, ""},
+		{" · " + stats.Bytes(float64(b.total)) + " total", ansiDim},
+	}
+}
 
-	out := []string{statsIndent + head}
-	ls, rs := stats.Chart(a.values, left, height, top), stats.Chart(b.values, right, height, top)
-	for i := range ls {
-		out = append(out, statsIndent+ansiCyan+ls[i]+ansiReset+gap+ansiCyan+rs[i]+ansiReset)
+func (p chartPanel) render(width, height, gutter int, framed bool) []string {
+	if framed {
+		if out, ok := p.framed(width, height, gutter); ok {
+			return out
+		}
+	}
+	return p.bare(width, height)
+}
+
+// bare is the panel without a box: the scale sits on the label line, and the
+// chart has the whole width.
+func (p chartPanel) bare(width, height int) []string {
+	out := []string{statsIndent + label(width,
+		append([]seg{{table.Pad(p.name, 9), ansiBold}}, p.head...),
+		seg{"0–" + p.scale, ansiDim})}
+	for _, l := range p.draw(width, height) {
+		out = append(out, statsIndent+l)
 	}
 	return out
+}
+
+// framed is the panel with an axis around the chart: the scale at the top
+// left corner, the zero at the bottom one, and how far back the chart reaches
+// under it. It returns false when the box would leave too little chart.
+func (p chartPanel) framed(width, height, gutter int) ([]string, bool) {
+	inner := width - gutter - 3 // the gutter, a space, and the two sides
+	if inner < minFramedInner {
+		return nil, false
+	}
+	pad := strings.Repeat(" ", gutter+1)
+	rule := strings.Repeat("─", inner)
+
+	out := []string{statsIndent + fit(width, append([]seg{{p.name + "  ", ansiBold}}, p.head...)...)}
+	out = append(out, statsIndent+ansiDim+rightPad(p.scale, gutter)+" ┌"+rule+"┐"+ansiReset)
+	for _, l := range p.draw(inner, height) {
+		out = append(out, statsIndent+ansiDim+pad+"│"+ansiReset+l+ansiDim+"│"+ansiReset)
+	}
+	out = append(out, statsIndent+ansiDim+rightPad("0", gutter)+" └"+rule+"┘"+ansiReset)
+	out = append(out, statsIndent+pad+label(inner+2,
+		[]seg{{ago(chartWindow(inner)), ansiDim}}, seg{"now", ansiDim}))
+	return out, true
+}
+
+// rightPad puts s against the right edge of w cells, so the scale and the
+// zero under it end where the box begins.
+func rightPad(s string, w int) string {
+	if n := w - table.Width(s); n > 0 {
+		return strings.Repeat(" ", n) + s
+	}
+	return s
+}
+
+// draw renders the series as dots, one line of the chart per string. Runs of
+// the same colour share one escape code, because a code for every cell would
+// make a wide chart several times the bytes it needs to be.
+func (p chartPanel) draw(width, height int) []string {
+	grids := make([]stats.Grid, len(p.lines))
+	for i, l := range p.lines {
+		grids[i] = stats.Dots(l.values, width, height, p.top)
+	}
+	out := make([]string, height)
+	for row := range out {
+		var b strings.Builder
+		open := ""
+		for col := range width {
+			var mask uint8
+			color := ""
+			for i, g := range grids {
+				if m := g.At(row, col); m != 0 {
+					mask |= m
+					if color == "" {
+						color = p.lines[i].color
+					}
+				}
+			}
+			if color != open {
+				if open != "" {
+					b.WriteString(ansiReset)
+				}
+				b.WriteString(color)
+				open = color
+			}
+			b.WriteRune(stats.Dot(mask))
+		}
+		if open != "" {
+			b.WriteString(ansiReset)
+		}
+		out[row] = b.String()
+	}
+	return out
+}
+
+// chartWindow is how much time a chart width cells wide covers. Two samples
+// go in each cell, and the history never holds more than it keeps.
+func chartWindow(width int) time.Duration {
+	return time.Duration(min(width*2, stats.History)) * refreshInterval
+}
+
+// ago writes a duration as one token for the left end of a time axis.
+func ago(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return strconv.Itoa(int(d.Seconds())) + "s ago"
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())) + "m ago"
+	default:
+		return strconv.Itoa(int(d.Hours())) + "h ago"
+	}
 }
 
 // seg is a run of text with one colour.

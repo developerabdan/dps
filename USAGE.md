@@ -244,13 +244,27 @@ four charts, updated every two seconds:
 |---|---|
 | CPU | Share of one CPU, as `docker stats` prints it, so two full cores read 200% |
 | MEMORY | Memory in use, of the limit, without the page cache the kernel can take back |
-| DISK | Read and write rates side by side, with the totals |
-| NETWORK | Received (`in`) and sent (`out`) rates side by side, with the totals |
+| DISK | Read and write rates on one chart, with the totals |
+| NETWORK | Received (`in`) and sent (`out`) rates on one chart, with the totals |
 
-The right end of each label gives the scale, for example `0–46%`. The top of a
-chart is a little above the highest value on it, but never less than a floor
-(10% CPU, 16MB memory, 100kB/s disk, 10kB/s network), so an idle container
-draws a flat line and not its own noise at full height.
+The charts are drawn with braille dots, which put two columns and four rows in
+every cell, so a line shows far more of its shape than the height of the
+window suggests. A terminal font without braille characters draws them as
+boxes; any modern font has them.
+
+DISK and NETWORK put their two series on one chart and one scale, so the
+larger of the two can be seen to be larger. The first one — `read`, `in` — is
+cyan and the second — `write`, `out` — is yellow, the same colours as their
+names on the label line.
+
+The top of a chart is a little above the highest value on it, but never less
+than a floor (10% CPU, 16MB memory, 100kB/s disk, 10kB/s network), so an idle
+container draws a flat line and not its own noise at full height.
+
+A window tall enough for it puts each chart in a box, with the scale at the
+top left corner, `0` at the bottom one, and how far back the chart reaches
+under it. A shorter window drops the boxes to keep the charts readable and
+gives the scale at the right end of the label instead, for example `0–46%`.
 
 `↑` `↓` move to the next running container without leaving the view. `esc`,
 `q` or `s` go back to the list. The charts start empty and fill from the right;
