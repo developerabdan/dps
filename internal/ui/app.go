@@ -67,6 +67,7 @@ const (
 	modeList mode = iota
 	modeStats
 	modePick
+	modeLogs
 )
 
 type (
@@ -151,6 +152,8 @@ type Model struct {
 	confirm *shellAsk
 
 	pick picker
+
+	logs logView
 }
 
 type shellAsk struct{ key, name string }
@@ -276,8 +279,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case logsMsg:
+		return m.takeLogs(msg)
+
 	case tea.MouseWheelMsg:
 		if m.mode == modeStats {
+			return m, nil
+		}
+		if m.mode == modeLogs {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				m.scrollLogs(-scrollJump)
+			case tea.MouseWheelDown:
+				m.scrollLogs(scrollJump)
+			}
 			return m, nil
 		}
 		switch msg.Button {
@@ -296,6 +311,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateStats(msg)
 		case m.mode == modePick:
 			return m.updatePick(msg)
+		case m.mode == modeLogs:
+			return m.updateLogs(msg)
 		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
@@ -339,6 +356,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.askShell()
 		case "s":
 			return m.openStats()
+		case "l":
+			return m.openLogs()
 		case "c":
 			return m.openPicker()
 		}
@@ -365,6 +384,9 @@ func (m Model) View() tea.View {
 	}
 	if m.mode == modeStats {
 		return altView(m.viewStats())
+	}
+	if m.mode == modeLogs {
+		return altView(m.viewLogs())
 	}
 
 	var b strings.Builder
@@ -669,7 +691,7 @@ func (m Model) status(dropped []table.Column, clipped bool) string {
 }
 
 func (m Model) help() string {
-	keys := "↑↓ move · s stats · e shell · c columns · a toggle stopped · r refresh · q quit"
+	keys := "↑↓ move · s stats · l logs · e shell · c columns · a toggle stopped · r refresh · q quit"
 	switch {
 	case m.confirm != nil:
 		keys = "y or enter opens the shell · any other key cancels"
@@ -677,6 +699,10 @@ func (m Model) help() string {
 		keys = "↑↓ move · space toggle · enter save as default · esc cancel"
 	case m.mode == modeStats:
 		keys = "↑↓ other container · esc back · ctrl+c quit"
+	case m.mode == modeLogs && m.logs.typing:
+		keys = "enter search · esc cancel"
+	case m.mode == modeLogs:
+		keys = "↑↓ scroll · / search · n N next match · f follow · esc back · ctrl+c quit"
 	}
 	return ansiDim + table.Truncate(keys, m.width, table.TruncTail) + ansiReset
 }

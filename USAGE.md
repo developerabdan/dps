@@ -198,6 +198,7 @@ The interactive view opens when stdout is a terminal and you passed none of
 | `g` / `home`, `G` / `end` | First row, last row |
 | wheel | Scroll the window |
 | `s` | Open the stats view for the selected container |
+| `l` | Open the logs view for the selected container |
 | `e` | Open a shell in the selected container, after you answer `y` |
 | `c` | Choose the columns |
 | `a` | Toggle stopped containers |
@@ -270,6 +271,36 @@ gives the scale at the right end of the label instead, for example `0–46%`.
 `q` or `s` go back to the list. The charts start empty and fill from the right;
 the history starts when the view first samples that container and is not kept
 after dps exits.
+
+### Logs
+
+`l` opens the logs view for the selected container. It shows the last 200
+lines, then every new line as the container writes it, like `docker logs -f`.
+A stopped container opens too: the view shows its log and says `end of log`.
+
+| Key | Action |
+|---|---|
+| `↑` `↓`, `k` `j`, wheel | Scroll one line (wheel: three) |
+| `PgUp` `PgDn`, `ctrl+u` `ctrl+d` | Scroll a page, half a page |
+| `g` / `home`, `G` / `end` | First line, last line |
+| `f` | Follow the log again, or pause it |
+| `/` | Search. Type the text, then `enter` |
+| `n` `N` | Next match down, next match up |
+| `esc` | Clear the search; with no search, go back to the list |
+| `q`, `l` | Go back to the list |
+
+The view follows the end of the log. Scroll up and it stops, so the lines you
+read stay where they are; the status line says `paused` and counts the new
+lines that arrived. `f` or `G` follows again, and so does scrolling back down
+to the last line.
+
+The search ignores case. It first jumps to the newest match at or above the
+screen, and marks every match on screen, the current one in yellow. `n` and
+`N` go round at the ends. New lines that match are found too.
+
+Colour codes and other escape codes in the log are removed, and long lines are
+cut at the edge of the window. The view keeps the last 10000 lines. The log is
+read again from the daemon each time the view opens.
 
 ### Choosing columns
 
@@ -380,8 +411,9 @@ DOCKER_HOST=unix:///run/user/1000/docker.sock dps
 
 `dps` asks for Docker API 1.44 and then clamps to whatever the daemon reports it
 supports, so old and new engines both work. It reads `GET /version` and
-`GET /containers/json`. The one thing it ever writes is the shell that `e`
-opens, through the exec endpoints.
+`GET /containers/json`, and `GET /containers/{id}/logs` for the logs view.
+The one thing it ever writes is the shell that `e` opens, through the exec
+endpoints.
 
 ## Output contract
 
